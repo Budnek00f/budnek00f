@@ -92,3 +92,10 @@
 2025-11-03 21:49:12,146 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot5696379337:AAFOKBjO0wiMZDs2lqsc7RPPFnODOJK4Qi4/getUpdates "HTTP/1.1 200 OK"
 2025-11-03 21:49:12,148 - telegram.ext.Application - INFO - Application is stopping. This might take a moment.
 2025-11-03 21:49:12,149 - telegram.ext.Application - INFO - Application.stop() complete
+2025-11-03 21:54:52,080 - __main__ - INFO - Database initialized successfully
+2025-11-03 21:54:52,080 - __main__ - INFO - Starting AI bot with context memory...
+2025-11-03 21:54:52,091 - __main__ - INFO - Bot started successfully with context memory
+2025-11-03 21:54:52,252 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot5696379337:AAFOKBjO0wiMZDs2lqsc7RPPFnODOJK4Qi4/getMe "HTTP/1.1 200 OK"
+2025-11-03 21:54:52,299 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot5696379337:AAFOKBjO0wiMZDs2lqsc7RPPFnODOJK4Qi4/deleteWebhook "HTTP/1.1 200 OK"
+2025-11-03 21:54:52,302 - telegram.ext.Application - INFO - Application started
+2025-11-03 21:55:02,464 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot5696379337:AAFOKBjO0wiMZDs2lqsc7RPPFnODOJK4Qi4/getUpdates "HTTP/1.1 200 OK"

@@ -28,8 +28,7 @@ YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
 
 # Состояния для ConversationHandler
-REMINDER_TEXT, REMINDER_TIME = range(2)
-TODO_TEXT = range(1)
+REMINDER_TEXT, REMINDER_TIME, TODO_TEXT = range(3)
 
 # Проверка обязательных переменных
 if not all([TELEGRAM_TOKEN, YANDEX_API_KEY, YANDEX_FOLDER_ID]):
@@ -39,7 +38,7 @@ if not all([TELEGRAM_TOKEN, YANDEX_API_KEY, YANDEX_FOLDER_ID]):
     if not YANDEX_FOLDER_ID: missing.append('YANDEX_FOLDER_ID')
     raise ValueError(f"Missing environment variables: {', '.join(missing)}")
 
-# Класс базы данных (остается без изменений)
+# Класс базы данных (упрощенная версия без изменений)
 class ChatDatabase:
     def __init__(self, db_path: str = "data/chat_history.db"):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -52,7 +51,7 @@ class ChatDatabase:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Таблица для хранения сообщений чата
+            # Таблицы остаются без изменений
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS chat_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +65,6 @@ class ChatDatabase:
                 )
             ''')
             
-            # Таблица для напоминаний
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS reminders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +79,6 @@ class ChatDatabase:
                 )
             ''')
             
-            # Таблица для списка дел
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS todos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +95,6 @@ class ChatDatabase:
                 )
             ''')
             
-            # Таблица для архива документов и фото
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS archives (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,13 +111,6 @@ class ChatDatabase:
                     tags TEXT
                 )
             ''')
-            
-            # Индексы
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(reminder_time)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_reminders_active ON reminders(is_active)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_todos_completed ON todos(is_completed)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_todos_due_date ON todos(due_date)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_archives_type ON archives(file_type)')
             
             conn.commit()
             conn.close()
@@ -155,7 +144,6 @@ class ChatDatabase:
             logger.error(f"Error saving message: {e}")
             return None
 
-    # === НАПОМИНАНИЯ ===
     def create_reminder(self, chat_id: int, user_id: int, username: str, 
                        reminder_text: str, reminder_time: datetime):
         """Создание напоминания"""
@@ -240,26 +228,6 @@ class ChatDatabase:
             logger.error(f"Error completing reminder: {e}")
             return False
 
-    def delete_reminder(self, reminder_id: int, user_id: int):
-        """Удалить напоминание"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                DELETE FROM reminders 
-                WHERE id = ? AND user_id = ?
-            ''', (reminder_id, user_id))
-            
-            conn.commit()
-            conn.close()
-            return cursor.rowcount > 0
-            
-        except Exception as e:
-            logger.error(f"Error deleting reminder: {e}")
-            return False
-
-    # === СПИСОК ДЕЛ ===
     def create_todo(self, chat_id: int, user_id: int, username: str, 
                    task_text: str, due_date: datetime = None, priority: int = 1):
         """Создание задачи"""
@@ -318,46 +286,6 @@ class ChatDatabase:
             logger.error(f"Error getting todos: {e}")
             return []
 
-    def complete_todo(self, task_id: int, user_id: int):
-        """Отметить задачу как выполненную"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                UPDATE todos 
-                SET is_completed = TRUE, completed_at = datetime('now')
-                WHERE id = ? AND user_id = ?
-            ''', (task_id, user_id))
-            
-            conn.commit()
-            conn.close()
-            return cursor.rowcount > 0
-            
-        except Exception as e:
-            logger.error(f"Error completing todo: {e}")
-            return False
-
-    def delete_todo(self, task_id: int, user_id: int):
-        """Удалить задачу"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                DELETE FROM todos 
-                WHERE id = ? AND user_id = ?
-            ''', (task_id, user_id))
-            
-            conn.commit()
-            conn.close()
-            return cursor.rowcount > 0
-            
-        except Exception as e:
-            logger.error(f"Error deleting todo: {e}")
-            return False
-
-    # === АРХИВ ДОКУМЕНТОВ И ФОТО ===
     def save_to_archive(self, chat_id: int, user_id: int, username: str,
                        file_name: str, file_type: str, file_path: str = None,
                        text_content: str = None, ocr_text: str = None, 
@@ -385,68 +313,10 @@ class ChatDatabase:
             logger.error(f"Error saving to archive: {e}")
             return None
 
-    def search_archives(self, chat_id: int, query: str = None, file_type: str = None):
-        """Поиск в архиве"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            if query and file_type:
-                cursor.execute('''
-                    SELECT * FROM archives 
-                    WHERE chat_id = ? AND file_type = ? 
-                    AND (file_name LIKE ? OR text_content LIKE ? OR ocr_text LIKE ?)
-                    ORDER BY uploaded_at DESC
-                ''', (chat_id, file_type, f'%{query}%', f'%{query}%', f'%{query}%'))
-            elif query:
-                cursor.execute('''
-                    SELECT * FROM archives 
-                    WHERE chat_id = ? 
-                    AND (file_name LIKE ? OR text_content LIKE ? OR ocr_text LIKE ?)
-                    ORDER BY uploaded_at DESC
-                ''', (chat_id, f'%{query}%', f'%{query}%', f'%{query}%'))
-            elif file_type:
-                cursor.execute('''
-                    SELECT * FROM archives 
-                    WHERE chat_id = ? AND file_type = ?
-                    ORDER BY uploaded_at DESC
-                ''', (chat_id, file_type))
-            else:
-                cursor.execute('''
-                    SELECT * FROM archives 
-                    WHERE chat_id = ? 
-                    ORDER BY uploaded_at DESC
-                    LIMIT 20
-                ''', (chat_id,))
-            
-            archives = []
-            for row in cursor.fetchall():
-                archives.append({
-                    'id': row[0],
-                    'file_name': row[4],
-                    'file_type': row[5],
-                    'file_path': row[6],
-                    'text_content': row[7],
-                    'ocr_text': row[8],
-                    'file_size': row[9],
-                    'uploaded_at': row[10],
-                    'tags': row[11]
-                })
-            
-            conn.close()
-            return archives
-            
-        except Exception as e:
-            logger.error(f"Error searching archives: {e}")
-            return []
-
 # Инициализация базы данных
 db = ChatDatabase()
 
 YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-
-# Триггеры для обращения к боту
-BOT_TRIGGERS = ['/bot', 'бот', '@bot']
 
 # === КЛАВИАТУРЫ ===
 def get_main_keyboard():
@@ -456,14 +326,13 @@ def get_main_keyboard():
         [KeyboardButton("📁 Архив"), KeyboardButton("🤖 AI Помощник")],
         [KeyboardButton("🎤 Голосовое сообщение"), KeyboardButton("ℹ️ Помощь")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие...")
 
 def get_reminders_keyboard():
     """Клавиатура для напоминаний"""
     keyboard = [
-        [InlineKeyboardButton("➕ Создать напоминание", callback_data="create_reminder")],
-        [InlineKeyboardButton("📋 Мои напоминания", callback_data="list_reminders")],
-        [InlineKeyboardButton("❌ Удалить напоминание", callback_data="delete_reminder")],
+        [InlineKeyboardButton("➕ Создать напоминание", callback_data="reminder_create")],
+        [InlineKeyboardButton("📋 Мои напоминания", callback_data="reminder_list")],
         [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -471,11 +340,9 @@ def get_reminders_keyboard():
 def get_todos_keyboard():
     """Клавиатура для задач"""
     keyboard = [
-        [InlineKeyboardButton("➕ Добавить задачу", callback_data="create_todo")],
-        [InlineKeyboardButton("📋 Активные задачи", callback_data="list_todos")],
-        [InlineKeyboardButton("✅ Выполненные задачи", callback_data="list_done_todos")],
-        [InlineKeyboardButton("✔️ Завершить задачу", callback_data="complete_todo")],
-        [InlineKeyboardButton("❌ Удалить задачу", callback_data="delete_todo")],
+        [InlineKeyboardButton("➕ Добавить задачу", callback_data="todo_create")],
+        [InlineKeyboardButton("📋 Активные задачи", callback_data="todo_list")],
+        [InlineKeyboardButton("✅ Выполненные задачи", callback_data="todo_list_done")],
         [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -485,7 +352,7 @@ def get_archive_keyboard():
     keyboard = [
         [InlineKeyboardButton("📸 Архив фото", callback_data="archive_photos")],
         [InlineKeyboardButton("📄 Архив документов", callback_data="archive_docs")],
-        [InlineKeyboardButton("🔍 Поиск в архиве", callback_data="search_archive")],
+        [InlineKeyboardButton("🔍 Поиск в архиве", callback_data="archive_search")],
         [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -493,9 +360,9 @@ def get_archive_keyboard():
 def get_ai_keyboard():
     """Клавиатура для AI помощника"""
     keyboard = [
-        [InlineKeyboardButton("💬 Задать вопрос", callback_data="ask_ai")],
-        [InlineKeyboardButton("🔍 Поиск в истории", callback_data="search_history")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="show_stats")],
+        [InlineKeyboardButton("💬 Задать вопрос", callback_data="ai_ask")],
+        [InlineKeyboardButton("🔍 Поиск в истории", callback_data="ai_search")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="ai_stats")],
         [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -518,6 +385,11 @@ def get_quick_time_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def get_back_keyboard():
+    """Простая кнопка назад"""
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]]
+    return InlineKeyboardMarkup(keyboard)
+
 # === УТИЛИТЫ ===
 def parse_reminder_time(time_str: str) -> datetime:
     """Парсинг времени для напоминаний"""
@@ -525,38 +397,22 @@ def parse_reminder_time(time_str: str) -> datetime:
         time_str = time_str.lower().strip()
         now = datetime.now()
         
-        # Относительное время (через 2 часа, через 30 минут)
-        if time_str.startswith('через'):
-            parts = time_str.split()
-            if 'минут' in time_str:
-                minutes = int(''.join(filter(str.isdigit, parts[1])))
-                return now + timedelta(minutes=minutes)
-            elif 'час' in time_str:
-                hours = int(''.join(filter(str.isdigit, parts[1])))
-                return now + timedelta(hours=hours)
-            elif 'день' in time_str or 'дня' in time_str or 'дней' in time_str:
-                days = int(''.join(filter(str.isdigit, parts[1])))
-                return now + timedelta(days=days)
+        if time_str == "через 1 час":
+            return now + timedelta(hours=1)
+        elif time_str == "через 2 часа":
+            return now + timedelta(hours=2)
+        elif time_str == "завтра 09:00":
+            return (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        elif time_str == "завтра 18:00":
+            return (now + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
         
-        # Абсолютное время (18:30, 2024-12-25 18:30)
-        elif ':' in time_str:
+        # Обработка пользовательского ввода
+        if ':' in time_str:
             if len(time_str) == 5:  # 18:30
                 time_obj = datetime.strptime(time_str, '%H:%M')
                 reminder_time = now.replace(hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0)
                 if reminder_time < now:
                     reminder_time += timedelta(days=1)
-                return reminder_time
-            else:  # 2024-12-25 18:30
-                return datetime.strptime(time_str, '%Y-%m-%d %H:%M')
-        
-        # Завтра в определенное время
-        elif time_str.startswith('завтра'):
-            time_part = time_str.replace('завтра', '').strip()
-            if ':' in time_part:
-                time_obj = datetime.strptime(time_part, '%H:%M')
-                reminder_time = (now + timedelta(days=1)).replace(
-                    hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0
-                )
                 return reminder_time
         
         return None
@@ -571,9 +427,9 @@ def speech_to_text(audio_file_path: str) -> str:
         recognizer = sr.Recognizer()
         
         # Конвертируем в WAV если нужно
-        if audio_file_path.endswith('.ogg'):
+        if audio_file_path.endswith('.oga'):
             audio = AudioSegment.from_ogg(audio_file_path)
-            wav_path = audio_file_path.replace('.ogg', '.wav')
+            wav_path = audio_file_path.replace('.oga', '.wav')
             audio.export(wav_path, format='wav')
             audio_file_path = wav_path
         
@@ -623,16 +479,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💬 **Текстовые команды:**\n"
         "• `/remind 18:30 Позвонить` - напоминание\n"
         "• `/todo Задача` - добавить задачу\n"
-        "• `/bot вопрос` - спросить AI\n"
-        "• Просто напишите сообщение боту\n\n"
-        "📁 **Отправка файлов:**\n"
-        "• Фото и документы автоматически сохраняются"
+        "• `/bot вопрос` - спросить AI"
     )
     
-    await update.message.reply_text(
-        help_text,
-        reply_markup=get_main_keyboard()
-    )
+    if update.message:
+        await update.message.reply_text(
+            help_text,
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        await update.callback_query.edit_message_text(
+            help_text,
+            reply_markup=get_main_keyboard()
+        )
 
 # === ОБРАБОТЧИКИ КНОПОК ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -640,52 +499,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    chat_id = query.message.chat_id
-    user_id = query.from_user.id
+    data = query.data
     
-    if query.data == "main_menu":
+    if data == "main_menu":
         await query.edit_message_text(
             "🎛️ **Главное меню**\n\nВыберите раздел:",
             reply_markup=get_main_keyboard()
         )
     
-    elif query.data == "create_reminder":
+    elif data == "reminder_create":
         await query.edit_message_text(
             "📅 **Создание напоминания**\n\n"
-            "Выберите время быстрого доступа или введите своё:\n"
-            "Формат: `18:30` или `2024-12-25 10:00`",
+            "Выберите время быстрого доступа:",
             reply_markup=get_quick_time_keyboard()
         )
     
-    elif query.data.startswith("time_"):
+    elif data.startswith("time_"):
         time_mapping = {
-            "time_1h": ("через 1 час", timedelta(hours=1)),
-            "time_2h": ("через 2 часа", timedelta(hours=2)),
-            "time_tomorrow_9": ("завтра 09:00", None),
-            "time_tomorrow_18": ("завтра 18:00", None)
+            "time_1h": "через 1 час",
+            "time_2h": "через 2 часа", 
+            "time_tomorrow_9": "завтра 09:00",
+            "time_tomorrow_18": "завтра 18:00"
         }
         
-        if query.data in time_mapping:
-            time_text, delta = time_mapping[query.data]
-            context.user_data['reminder_time'] = time_text
-            
-            if query.data == "time_custom":
-                await query.edit_message_text(
-                    "⏰ Введите время в формате:\n"
-                    "• `18:30` - сегодня в 18:30\n"
-                    "• `2024-12-25 10:00` - конкретная дата\n"
-                    "• `через 2 часа` - через 2 часа\n"
-                    "• `завтра 09:00` - завтра в 9 утра"
-                )
-            else:
-                await query.edit_message_text(
-                    f"⏰ Время: {time_text}\n\n"
-                    "📝 Теперь введите текст напоминания:"
-                )
-                return REMINDER_TEXT
+        if data in time_mapping:
+            context.user_data['reminder_time'] = time_mapping[data]
+            await query.edit_message_text(
+                f"⏰ Время: {time_mapping[data]}\n\n"
+                "📝 Теперь введите текст напоминания:"
+            )
+            return REMINDER_TEXT
+        
+        elif data == "time_custom":
+            await query.edit_message_text(
+                "⏰ Введите время в формате ЧЧ:ММ (например, 18:30):"
+            )
+            return REMINDER_TIME
     
-    elif query.data == "list_reminders":
-        reminders = db.get_active_reminders(chat_id)
+    elif data == "reminder_list":
+        reminders = db.get_active_reminders(query.message.chat_id)
         
         if not reminders:
             await query.edit_message_text(
@@ -708,14 +560,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_reminders_keyboard()
         )
     
-    elif query.data == "create_todo":
+    elif data == "todo_create":
         await query.edit_message_text(
             "✅ **Добавление задачи**\n\nВведите текст задачи:"
         )
         return TODO_TEXT
     
-    elif query.data == "list_todos":
-        todos = db.get_todos(chat_id, completed=False)
+    elif data == "todo_list":
+        todos = db.get_todos(query.message.chat_id, completed=False)
         
         if not todos:
             await query.edit_message_text(
@@ -740,26 +592,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_todos_keyboard()
         )
     
-    elif query.data == "ask_ai":
+    elif data == "ai_ask":
         await query.edit_message_text(
             "🤖 **AI Помощник**\n\nЗадайте ваш вопрос:"
         )
         # Здесь можно добавить состояние для AI вопроса
     
-    elif query.data == "show_stats":
+    elif data == "ai_stats":
+        chat_id = query.message.chat_id
         todos = db.get_todos(chat_id, completed=False)
         reminders = db.get_active_reminders(chat_id)
-        archives = db.search_archives(chat_id)
         
         response = "📊 **Статистика:**\n\n"
         response += f"✅ Активных задач: {len(todos)}\n"
         response += f"🔔 Активных напоминаний: {len(reminders)}\n"
-        response += f"📁 Файлов в архиве: {len(archives)}\n"
         
         await query.edit_message_text(
             response,
             reply_markup=get_ai_keyboard()
         )
+    
+    elif data == "cancel":
+        await query.edit_message_text(
+            "❌ Операция отменена",
+            reply_markup=get_main_keyboard()
+        )
+        return ConversationHandler.END
 
 # === ОБРАБОТЧИКИ СООБЩЕНИЙ С КНОПКАМИ ===
 async def handle_main_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -805,19 +663,33 @@ async def handle_main_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         await help_command(update, context)
     
     else:
-        # Сохраняем сообщение и проверяем, нужно ли отвечать
-        db.save_message(chat_id, update.effective_user.id, 
-                       update.effective_user.username or update.effective_user.first_name, 
-                       text, False)
+        # Обычное текстовое сообщение
+        await handle_text_message(update, context)
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка обычных текстовых сообщений"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    message_text = update.message.text
+    
+    # Сохраняем сообщение
+    db.save_message(chat_id, user_id, username, message_text, False)
+    
+    # Проверяем, обращаются ли к боту
+    bot_username = context.bot.username
+    should_respond = any(trigger in message_text.lower() for trigger in ['/bot', 'бот']) or (bot_username and f"@{bot_username}" in message_text)
+    
+    if should_respond:
+        clean_query = message_text
+        for trigger in ['/bot', 'бот']:
+            clean_query = clean_query.replace(trigger, '')
+        if bot_username:
+            clean_query = clean_query.replace(f"@{bot_username}", '')
+        clean_query = clean_query.strip()
         
-        bot_username = context.bot.username
-        if should_respond_to_message(text, bot_username):
-            clean_query = extract_user_message(text, bot_username)
-            if clean_query:
-                await process_bot_request(update, context, chat_id, 
-                                        update.effective_user.id,
-                                        update.effective_user.username or update.effective_user.first_name,
-                                        clean_query)
+        if clean_query:
+            await process_bot_request(update, context, chat_id, user_id, username, clean_query)
 
 # === ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ ===
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -833,24 +705,29 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     voice_dir = "voice_messages"
     os.makedirs(voice_dir, exist_ok=True)
     
-    file_path = os.path.join(voice_dir, f"{voice.file_id}.ogg")
+    file_path = os.path.join(voice_dir, f"{voice.file_id}.oga")
     await file.download_to_drive(file_path)
     
     await update.message.reply_text("🎤 Обрабатываю голосовое сообщение...")
     
-    # Преобразуем голос в текст
-    text = speech_to_text(file_path)
+    try:
+        # Преобразуем голос в текст
+        text = speech_to_text(file_path)
+        
+        if text:
+            await update.message.reply_text(f"📝 Распознано: _{text}_")
+            
+            # Сохраняем распознанный текст
+            db.save_message(chat_id, user_id, username, f"[VOICE] {text}", False)
+            
+            # Обрабатываем команду из голосового сообщения
+            await process_voice_command(update, context, chat_id, user_id, username, text)
+        else:
+            await update.message.reply_text("❌ Не удалось распознать голосовое сообщение")
     
-    if text:
-        await update.message.reply_text(f"📝 Распознано: _{text}_")
-        
-        # Сохраняем распознанный текст
-        db.save_message(chat_id, user_id, username, f"[VOICE] {text}", False)
-        
-        # Обрабатываем команду из голосового сообщения
-        await process_voice_command(update, context, chat_id, user_id, username, text)
-    else:
-        await update.message.reply_text("❌ Не удалось распознать голосовое сообщение")
+    except Exception as e:
+        logger.error(f"Error processing voice message: {e}")
+        await update.message.reply_text("❌ Ошибка при обработке голосового сообщения")
 
 async def process_voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                chat_id: int, user_id: int, username: str, text: str):
@@ -858,20 +735,20 @@ async def process_voice_command(update: Update, context: ContextTypes.DEFAULT_TY
     text_lower = text.lower()
     
     # Напоминания
-    if any(word in text_lower for word in ['напомни', 'напоминание', 'напомни']):
-        if 'завтра' in text_lower:
-            time_match = 'завтра'
-            if '9' in text_lower or 'девять' in text_lower:
-                time_match += ' 09:00'
-            elif '10' in text_lower:
-                time_match += ' 10:00'
-            else:
-                time_match += ' 18:00'
-        else:
-            time_match = '18:30'
+    if any(word in text_lower for word in ['напомни', 'напоминание']):
+        time_match = "18:30"  # значение по умолчанию
+        if 'завтра' in text_lower and '10' in text_lower:
+            time_match = "завтра 09:00"
+        elif 'завтра' in text_lower:
+            time_match = "завтра 18:00"
+        elif 'час' in text_lower:
+            time_match = "через 1 час"
         
         # Извлекаем текст напоминания
-        reminder_text = text.replace('напомни', '').replace('создай напоминание', '').strip()
+        reminder_text = text
+        for word in ['напомни', 'создай напоминание', 'напоминание']:
+            reminder_text = reminder_text.replace(word, '')
+        reminder_text = reminder_text.strip()
         
         reminder_time = parse_reminder_time(time_match)
         if reminder_time and reminder_text:
@@ -885,7 +762,11 @@ async def process_voice_command(update: Update, context: ContextTypes.DEFAULT_TY
     
     # Задачи
     elif any(word in text_lower for word in ['задача', 'добавь задачу', 'создай задачу']):
-        task_text = text.replace('добавь задачу', '').replace('создай задачу', '').strip()
+        task_text = text
+        for word in ['добавь задачу', 'создай задачу']:
+            task_text = task_text.replace(word, '')
+        task_text = task_text.strip()
+        
         if task_text:
             task_id = db.create_todo(chat_id, user_id, username, task_text)
             if task_id:
@@ -896,7 +777,7 @@ async def process_voice_command(update: Update, context: ContextTypes.DEFAULT_TY
         todos = db.get_todos(chat_id, completed=False)
         if todos:
             response = "✅ **Ваши задачи:**\n\n"
-            for todo in todos[:5]:  # Ограничиваем вывод
+            for todo in todos[:5]:
                 response += f"• {todo['task_text']}\n"
             await update.message.reply_text(response)
         else:
@@ -916,59 +797,91 @@ async def process_voice_command(update: Update, context: ContextTypes.DEFAULT_TY
         # Если не распознана команда, отправляем в AI
         await process_bot_request(update, context, chat_id, user_id, username, text)
 
-# === СУЩЕСТВУЮЩИЕ ФУНКЦИИ (немного адаптированные) ===
-def should_respond_to_message(message_text: str, bot_username: str) -> bool:
-    """Проверяет, должно ли сообщение trigger ответ бота"""
-    if not message_text:
-        return False
+# === Conversation Handlers ===
+async def reminder_time_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик времени напоминания"""
+    time_text = update.message.text
+    reminder_time = parse_reminder_time(time_text)
     
-    message_lower = message_text.lower()
-    
-    for trigger in BOT_TRIGGERS:
-        if trigger in message_lower:
-            return True
-    
-    if bot_username and f"@{bot_username}" in message_text:
-        return True
-    
-    return False
+    if reminder_time:
+        context.user_data['reminder_time'] = time_text
+        await update.message.reply_text(
+            f"⏰ Время: {time_text}\n\n"
+            "📝 Теперь введите текст напоминания:"
+        )
+        return REMINDER_TEXT
+    else:
+        await update.message.reply_text(
+            "❌ Неверный формат времени. Попробуйте снова (ЧЧ:ММ):"
+        )
+        return REMINDER_TIME
 
-def extract_user_message(message_text: str, bot_username: str) -> str:
-    """Извлекает чистый запрос пользователя из сообщения"""
-    clean_text = message_text
+async def reminder_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик текста напоминания"""
+    reminder_text = update.message.text
+    reminder_time_str = context.user_data.get('reminder_time')
     
-    for trigger in BOT_TRIGGERS:
-        clean_text = clean_text.replace(trigger, '').replace(trigger.upper(), '')
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
     
-    if bot_username:
-        clean_text = clean_text.replace(f"@{bot_username}", '')
+    reminder_time = parse_reminder_time(reminder_time_str)
     
-    return clean_text.strip()
+    if reminder_time:
+        reminder_id = db.create_reminder(chat_id, user_id, username, reminder_text, reminder_time)
+        
+        if reminder_id:
+            await update.message.reply_text(
+                f"✅ Напоминание создано!\n\n"
+                f"📅 **Когда:** {reminder_time.strftime('%d.%m.%Y %H:%M')}\n"
+                f"📝 **Текст:** {reminder_text}",
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Ошибка при создании напоминания",
+                reply_markup=get_main_keyboard()
+            )
+    else:
+        await update.message.reply_text(
+            "❌ Ошибка при создании напоминания",
+            reply_markup=get_main_keyboard()
+        )
+    
+    return ConversationHandler.END
 
-def get_conversation_context(chat_id: int, current_message: str, limit: int = 15) -> str:
-    """Получает контекст разговора для AI"""
-    try:
-        chat_history = db.get_chat_history(chat_id, limit=limit)
-        
-        if not chat_history:
-            return ""
-        
-        context_lines = []
-        context_lines.append("Контекст предыдущего разговора в чате:")
-        
-        for msg in chat_history:
-            role = "Ассистент" if msg['is_bot'] else "Пользователь"
-            name = msg['username']
-            context_lines.append(f"{role} {name}: {msg['text']}")
-        
-        context_lines.append(f"\nТекущий запрос пользователя: {current_message}")
-        
-        return "\n".join(context_lines)
-        
-    except Exception as e:
-        logger.error(f"Error getting conversation context: {e}")
-        return ""
+async def todo_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик текста задачи"""
+    task_text = update.message.text
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    
+    task_id = db.create_todo(chat_id, user_id, username, task_text)
+    
+    if task_id:
+        await update.message.reply_text(
+            f"✅ Задача добавлена!\n\n📝 **Задача:** {task_text}",
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Ошибка при добавлении задачи",
+            reply_markup=get_main_keyboard()
+        )
+    
+    return ConversationHandler.END
 
+async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отмена диалога"""
+    await update.message.reply_text(
+        "❌ Операция отменена",
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+# === AI ФУНКЦИОНАЛ ===
 def get_yandex_gpt_response(prompt: str, context: str = "") -> str:
     """Получение ответа от YandexGPT с контекстом"""
     try:
@@ -977,7 +890,7 @@ def get_yandex_gpt_response(prompt: str, context: str = "") -> str:
             "Content-Type": "application/json"
         }
         
-        system_message = """Ты - умный помощник в чате Telegram с голосовым управлением и кнопками. Отвечай кратко и полезно."""
+        system_message = "Ты - умный помощник в чате Telegram. Отвечай кратко и полезно."
         
         if context:
             system_message += f"\n\nКонтекст чата:\n{context}"
@@ -1016,13 +929,11 @@ async def process_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Обрабатывает запрос к боту"""
     await update.message.chat.send_action(action="typing")
     
-    conversation_context = get_conversation_context(chat_id, user_message)
-    
-    bot_response = get_yandex_gpt_response(user_message, conversation_context)
+    bot_response = get_yandex_gpt_response(user_message)
     
     # Добавляем кнопки для продолжения диалога
     keyboard = [
-        [InlineKeyboardButton("💬 Еще вопрос", callback_data="ask_ai")],
+        [InlineKeyboardButton("💬 Еще вопрос", callback_data="ai_ask")],
         [InlineKeyboardButton("📋 Меню", callback_data="main_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1030,74 +941,34 @@ async def process_bot_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     sent_message = await update.message.reply_text(bot_response, reply_markup=reply_markup)
     db.save_message(chat_id, context.bot.id, context.bot.username, bot_response, True)
 
-# === Conversation Handlers ===
-async def reminder_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработчик текста напоминания"""
-    reminder_text = update.message.text
-    reminder_time = context.user_data.get('reminder_time')
-    
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    reminder_time_obj = parse_reminder_time(reminder_time)
-    
-    if reminder_time_obj:
-        reminder_id = db.create_reminder(chat_id, user_id, username, reminder_text, reminder_time_obj)
+# === ФУНКЦИИ ДЛЯ НАПОМИНАНИЙ ===
+async def check_reminders(context: CallbackContext):
+    """Проверка и отправка напоминаний"""
+    try:
+        reminders = db.get_active_reminders()
         
-        if reminder_id:
-            await update.message.reply_text(
-                f"✅ Напоминание создано!\n\n"
-                f"📅 **Когда:** {reminder_time_obj.strftime('%d.%m.%Y %H:%M')}\n"
-                f"📝 **Текст:** {reminder_text}\n"
-                f"🆔 **ID:** {reminder_id}",
-                reply_markup=get_main_keyboard()
-            )
-        else:
-            await update.message.reply_text(
-                "❌ Ошибка при создании напоминания",
-                reply_markup=get_main_keyboard()
-            )
-    else:
-        await update.message.reply_text(
-            "❌ Неверный формат времени",
-            reply_markup=get_main_keyboard()
-        )
-    
-    return ConversationHandler.END
+        for reminder in reminders:
+            reminder_time = datetime.strptime(reminder['time'], '%Y-%m-%d %H:%M:%S')
+            
+            if reminder_time <= datetime.now():
+                message = f"🔔 **Напоминание**\n\n{reminder['text']}"
+                
+                await context.bot.send_message(
+                    chat_id=reminder['chat_id'],
+                    text=message
+                )
+                
+                db.complete_reminder(reminder['id'])
+                logger.info(f"Sent reminder: {reminder['id']}")
+                
+    except Exception as e:
+        logger.error(f"Error checking reminders: {e}")
 
-async def todo_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработчик текста задачи"""
-    task_text = update.message.text
-    
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    task_id = db.create_todo(chat_id, user_id, username, task_text)
-    
-    if task_id:
-        await update.message.reply_text(
-            f"✅ Задача добавлена!\n\n📝 **Задача:** {task_text}\n🆔 **ID:** {task_id}",
-            reply_markup=get_main_keyboard()
-        )
-    else:
-        await update.message.reply_text(
-            "❌ Ошибка при добавлении задачи",
-            reply_markup=get_main_keyboard()
-        )
-    
-    return ConversationHandler.END
+async def reminder_worker(context: CallbackContext):
+    """Фоновая задача для проверки напоминаний"""
+    await check_reminders(context)
 
-async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отмена диалога"""
-    await update.message.reply_text(
-        "❌ Операция отменена",
-        reply_markup=get_main_keyboard()
-    )
-    return ConversationHandler.END
-
-# === ОБРАБОТЧИКИ ФАЙЛОВ (остаются без изменений) ===
+# === ОБРАБОТЧИКИ ФАЙЛОВ ===
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка документов"""
     chat_id = update.effective_chat.id
@@ -1119,11 +990,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(file_path, 'r', encoding='utf-8') as f:
                 text_content = f.read()
         except:
-            try:
-                with open(file_path, 'r', encoding='cp1251') as f:
-                    text_content = f.read()
-            except:
-                text_content = "Не удалось прочитать файл"
+            text_content = "Не удалось прочитать файл"
     
     archive_id = db.save_to_archive(
         chat_id, user_id, username,
@@ -1133,11 +1000,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if archive_id:
         response = f"📄 Документ сохранен в архив!\n\n📁 **Файл:** {document.file_name}"
-        if text_content:
-            preview = text_content[:200] + "..." if len(text_content) > 200 else text_content
-            response += f"\n📝 **Содержание:** {preview}"
-        response += f"\n🆔 **ID:** {archive_id}"
-        
         await update.message.reply_text(response, reply_markup=get_main_keyboard())
     else:
         await update.message.reply_text("❌ Ошибка при сохранении документа", reply_markup=get_main_keyboard())
@@ -1170,33 +1032,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Ошибка при сохранении фото", reply_markup=get_main_keyboard())
 
-# === ФУНКЦИИ ДЛЯ НАПОМИНАНИЙ ===
-async def check_reminders(context: CallbackContext):
-    """Проверка и отправка напоминаний"""
-    try:
-        reminders = db.get_active_reminders()
-        
-        for reminder in reminders:
-            reminder_time = datetime.strptime(reminder['time'], '%Y-%m-%d %H:%M:%S')
-            
-            if reminder_time <= datetime.now():
-                message = f"🔔 **Напоминание**\n\n{reminder['text']}"
-                
-                await context.bot.send_message(
-                    chat_id=reminder['chat_id'],
-                    text=message
-                )
-                
-                db.complete_reminder(reminder['id'])
-                logger.info(f"Sent reminder: {reminder['id']}")
-                
-    except Exception as e:
-        logger.error(f"Error checking reminders: {e}")
-
-def reminder_worker(context: CallbackContext):
-    """Фоновая задача для проверки напоминаний"""
-    import asyncio
-    asyncio.create_task(check_reminders(context))
+# === ОБРАБОТЧИК ОШИБОК ===
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Error: {context.error}")
+    
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "❌ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
 
 def main():
     """Основная функция"""
@@ -1207,24 +1052,31 @@ def main():
         
         # Conversation Handlers
         reminder_conv_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(button_handler, pattern="^time_")],
+            entry_points=[
+                CallbackQueryHandler(button_handler, pattern="^time_"),
+                CallbackQueryHandler(button_handler, pattern="^reminder_create$")
+            ],
             states={
+                REMINDER_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reminder_time_handler)],
                 REMINDER_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, reminder_text_handler)],
             },
-            fallbacks=[CommandHandler('cancel', cancel_handler)]
+            fallbacks=[CommandHandler('cancel', cancel_handler)],
+            per_message=False
         )
         
         todo_conv_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(button_handler, pattern="^create_todo$")],
+            entry_points=[CallbackQueryHandler(button_handler, pattern="^todo_create$")],
             states={
                 TODO_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, todo_text_handler)],
             },
-            fallbacks=[CommandHandler('cancel', cancel_handler)]
+            fallbacks=[CommandHandler('cancel', cancel_handler)],
+            per_message=False
         )
         
         # Основные команды
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("cancel", cancel_handler))
         
         # Conversation handlers
         application.add_handler(reminder_conv_handler)
@@ -1232,6 +1084,8 @@ def main():
         
         # Обработчики кнопок
         application.add_handler(CallbackQueryHandler(button_handler))
+        
+        # Обработчики основных кнопок
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_main_buttons))
         
         # Обработчики голосовых сообщений
@@ -1240,6 +1094,9 @@ def main():
         # Обработчики файлов
         application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
         application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        
+        # Обработчик ошибок
+        application.add_error_handler(error_handler)
         
         # Настройка планировщика для напоминаний
         job_queue = application.job_queue

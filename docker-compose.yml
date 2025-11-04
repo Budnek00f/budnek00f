@@ -6,7 +6,6 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
-    environment:
-      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
-      - YANDEX_API_KEY=${YANDEX_API_KEY}
-      - YANDEX_FOLDER_ID=${YANDEX_FOLDER_ID}
+      - ./archives:/app/archives
+    env_file:
+      - .env

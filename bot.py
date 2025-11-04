@@ -3,8 +3,18 @@ import os
 import requests
 import sqlite3
 import json
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import schedule
+import time
+import threading
+from datetime import datetime, timedelta
+from telegram import Update, InputFile
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
+import pytesseract
+from PIL import Image
+import cv2
+import io
+import pdf2image
+import tempfile
 
 # Настройка логирования
 logging.basicConfig(
@@ -43,6 +53,7 @@ class ChatDatabase:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
+            # Таблица для хранения сообщений чата
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS chat_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,19 +67,62 @@ class ChatDatabase:
                 )
             ''')
             
+            # Таблица для напоминаний
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS chat_context (
+                CREATE TABLE IF NOT EXISTS reminders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER UNIQUE NOT NULL,
-                    last_topics TEXT,
-                    key_entities TEXT,
-                    last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    summary TEXT
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT,
+                    reminder_text TEXT NOT NULL,
+                    reminder_time DATETIME NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    is_completed BOOLEAN DEFAULT FALSE,
+                    is_active BOOLEAN DEFAULT TRUE
                 )
             ''')
             
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_id ON chat_messages(chat_id)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp)')
+            # Таблица для списка дел
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS todos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT,
+                    task_text TEXT NOT NULL,
+                    priority INTEGER DEFAULT 1,
+                    due_date DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    completed_at DATETIME,
+                    is_completed BOOLEAN DEFAULT FALSE,
+                    category TEXT DEFAULT 'general'
+                )
+            ''')
+            
+            # Таблица для архива документов и фото
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS archives (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT,
+                    file_name TEXT NOT NULL,
+                    file_type TEXT NOT NULL,
+                    file_path TEXT,
+                    text_content TEXT,
+                    ocr_text TEXT,
+                    file_size INTEGER,
+                    uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    tags TEXT
+                )
+            ''')
+            
+            # Индексы
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(reminder_time)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_reminders_active ON reminders(is_active)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_todos_completed ON todos(is_completed)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_todos_due_date ON todos(due_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_archives_type ON archives(file_type)')
             
             conn.commit()
             conn.close()
@@ -92,22 +146,300 @@ class ChatDatabase:
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (chat_id, user_id, username, message_text, is_bot_message, message_type))
             
-            cursor.execute('''
-                INSERT OR REPLACE INTO chat_context 
-                (chat_id, last_activity) 
-                VALUES (?, CURRENT_TIMESTAMP)
-            ''', (chat_id,))
-            
             conn.commit()
             message_id = cursor.lastrowid
             conn.close()
             
-            logger.debug(f"Message saved: chat_id={chat_id}, user_id={user_id}")
             return message_id
             
         except Exception as e:
             logger.error(f"Error saving message: {e}")
             return None
+
+    # === НАПОМИНАНИЯ ===
+    def create_reminder(self, chat_id: int, user_id: int, username: str, 
+                       reminder_text: str, reminder_time: datetime):
+        """Создание напоминания"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO reminders 
+                (chat_id, user_id, username, reminder_text, reminder_time)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (chat_id, user_id, username, reminder_text, reminder_time))
+            
+            conn.commit()
+            reminder_id = cursor.lastrowid
+            conn.close()
+            
+            logger.info(f"Reminder created: {reminder_id}")
+            return reminder_id
+            
+        except Exception as e:
+            logger.error(f"Error creating reminder: {e}")
+            return None
+
+    def get_active_reminders(self, chat_id: int = None):
+        """Получение активных напоминаний"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            if chat_id:
+                cursor.execute('''
+                    SELECT * FROM reminders 
+                    WHERE is_active = TRUE AND is_completed = FALSE 
+                    AND chat_id = ? AND reminder_time > datetime('now')
+                    ORDER BY reminder_time
+                ''', (chat_id,))
+            else:
+                cursor.execute('''
+                    SELECT * FROM reminders 
+                    WHERE is_active = TRUE AND is_completed = FALSE 
+                    AND reminder_time <= datetime('now', '+1 hour')
+                    ORDER BY reminder_time
+                ''')
+            
+            reminders = []
+            for row in cursor.fetchall():
+                reminders.append({
+                    'id': row[0],
+                    'chat_id': row[1],
+                    'user_id': row[2],
+                    'username': row[3],
+                    'text': row[4],
+                    'time': row[5],
+                    'created_at': row[6]
+                })
+            
+            conn.close()
+            return reminders
+            
+        except Exception as e:
+            logger.error(f"Error getting reminders: {e}")
+            return []
+
+    def complete_reminder(self, reminder_id: int):
+        """Отметить напоминание как выполненное"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE reminders 
+                SET is_completed = TRUE, is_active = FALSE 
+                WHERE id = ?
+            ''', (reminder_id,))
+            
+            conn.commit()
+            conn.close()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error completing reminder: {e}")
+            return False
+
+    def delete_reminder(self, reminder_id: int, user_id: int):
+        """Удалить напоминание"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                DELETE FROM reminders 
+                WHERE id = ? AND user_id = ?
+            ''', (reminder_id, user_id))
+            
+            conn.commit()
+            conn.close()
+            return cursor.rowcount > 0
+            
+        except Exception as e:
+            logger.error(f"Error deleting reminder: {e}")
+            return False
+
+    # === СПИСОК ДЕЛ ===
+    def create_todo(self, chat_id: int, user_id: int, username: str, 
+                   task_text: str, due_date: datetime = None, priority: int = 1):
+        """Создание задачи"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO todos 
+                (chat_id, user_id, username, task_text, due_date, priority)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (chat_id, user_id, username, task_text, due_date, priority))
+            
+            conn.commit()
+            task_id = cursor.lastrowid
+            conn.close()
+            
+            return task_id
+            
+        except Exception as e:
+            logger.error(f"Error creating todo: {e}")
+            return None
+
+    def get_todos(self, chat_id: int, completed: bool = False):
+        """Получение списка дел"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT * FROM todos 
+                WHERE chat_id = ? AND is_completed = ?
+                ORDER BY 
+                    CASE WHEN due_date IS NULL THEN 1 ELSE 0 END,
+                    due_date,
+                    priority DESC,
+                    created_at
+            ''', (chat_id, completed))
+            
+            todos = []
+            for row in cursor.fetchall():
+                todos.append({
+                    'id': row[0],
+                    'task_text': row[4],
+                    'priority': row[5],
+                    'due_date': row[6],
+                    'created_at': row[7],
+                    'completed_at': row[8],
+                    'category': row[10]
+                })
+            
+            conn.close()
+            return todos
+            
+        except Exception as e:
+            logger.error(f"Error getting todos: {e}")
+            return []
+
+    def complete_todo(self, task_id: int, user_id: int):
+        """Отметить задачу как выполненную"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE todos 
+                SET is_completed = TRUE, completed_at = datetime('now')
+                WHERE id = ? AND user_id = ?
+            ''', (task_id, user_id))
+            
+            conn.commit()
+            conn.close()
+            return cursor.rowcount > 0
+            
+        except Exception as e:
+            logger.error(f"Error completing todo: {e}")
+            return False
+
+    def delete_todo(self, task_id: int, user_id: int):
+        """Удалить задачу"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                DELETE FROM todos 
+                WHERE id = ? AND user_id = ?
+            ''', (task_id, user_id))
+            
+            conn.commit()
+            conn.close()
+            return cursor.rowcount > 0
+            
+        except Exception as e:
+            logger.error(f"Error deleting todo: {e}")
+            return False
+
+    # === АРХИВ ДОКУМЕНТОВ И ФОТО ===
+    def save_to_archive(self, chat_id: int, user_id: int, username: str,
+                       file_name: str, file_type: str, file_path: str = None,
+                       text_content: str = None, ocr_text: str = None, 
+                       file_size: int = None, tags: str = None):
+        """Сохранение файла в архив"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO archives 
+                (chat_id, user_id, username, file_name, file_type, file_path, 
+                 text_content, ocr_text, file_size, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (chat_id, user_id, username, file_name, file_type, file_path,
+                  text_content, ocr_text, file_size, tags))
+            
+            conn.commit()
+            archive_id = cursor.lastrowid
+            conn.close()
+            
+            return archive_id
+            
+        except Exception as e:
+            logger.error(f"Error saving to archive: {e}")
+            return None
+
+    def search_archives(self, chat_id: int, query: str = None, file_type: str = None):
+        """Поиск в архиве"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            if query and file_type:
+                cursor.execute('''
+                    SELECT * FROM archives 
+                    WHERE chat_id = ? AND file_type = ? 
+                    AND (file_name LIKE ? OR text_content LIKE ? OR ocr_text LIKE ?)
+                    ORDER BY uploaded_at DESC
+                ''', (chat_id, file_type, f'%{query}%', f'%{query}%', f'%{query}%'))
+            elif query:
+                cursor.execute('''
+                    SELECT * FROM archives 
+                    WHERE chat_id = ? 
+                    AND (file_name LIKE ? OR text_content LIKE ? OR ocr_text LIKE ?)
+                    ORDER BY uploaded_at DESC
+                ''', (chat_id, f'%{query}%', f'%{query}%', f'%{query}%'))
+            elif file_type:
+                cursor.execute('''
+                    SELECT * FROM archives 
+                    WHERE chat_id = ? AND file_type = ?
+                    ORDER BY uploaded_at DESC
+                ''', (chat_id, file_type))
+            else:
+                cursor.execute('''
+                    SELECT * FROM archives 
+                    WHERE chat_id = ? 
+                    ORDER BY uploaded_at DESC
+                    LIMIT 20
+                ''', (chat_id,))
+            
+            archives = []
+            for row in cursor.fetchall():
+                archives.append({
+                    'id': row[0],
+                    'file_name': row[4],
+                    'file_type': row[5],
+                    'file_path': row[6],
+                    'text_content': row[7],
+                    'ocr_text': row[8],
+                    'file_size': row[9],
+                    'uploaded_at': row[10],
+                    'tags': row[11]
+                })
+            
+            conn.close()
+            return archives
+            
+        except Exception as e:
+            logger.error(f"Error searching archives: {e}")
+            return []
 
     def get_chat_history(self, chat_id: int, limit: int = 50) -> list:
         """Получение истории чата"""
@@ -168,66 +500,6 @@ class ChatDatabase:
             logger.error(f"Error searching messages: {e}")
             return []
 
-    def get_chat_summary(self, chat_id: int) -> dict:
-        """Получение сводки по чату"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT 
-                    COUNT(*) as total_messages,
-                    COUNT(DISTINCT user_id) as unique_users,
-                    MIN(timestamp) as first_message,
-                    MAX(timestamp) as last_message
-                FROM chat_messages 
-                WHERE chat_id = ?
-            ''', (chat_id,))
-            
-            stats = cursor.fetchone()
-            
-            cursor.execute('''
-                SELECT username, COUNT(*) as message_count
-                FROM chat_messages 
-                WHERE chat_id = ?
-                GROUP BY username 
-                ORDER BY message_count DESC 
-                LIMIT 5
-            ''', (chat_id,))
-            
-            top_users = [{'username': row[0], 'count': row[1]} for row in cursor.fetchall()]
-            
-            conn.close()
-            
-            return {
-                'total_messages': stats[0] if stats else 0,
-                'unique_users': stats[1] if stats else 0,
-                'first_message': stats[2] if stats else None,
-                'last_message': stats[3] if stats else None,
-                'top_users': top_users,
-                'top_keywords': []
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting chat summary: {e}")
-            return {}
-
-    def clear_chat_history(self, chat_id: int):
-        """Очистка истории чата"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('DELETE FROM chat_messages WHERE chat_id = ?', (chat_id,))
-            cursor.execute('DELETE FROM chat_context WHERE chat_id = ?', (chat_id,))
-            
-            conn.commit()
-            conn.close()
-            logger.info(f"Cleared history for chat {chat_id}")
-            
-        except Exception as e:
-            logger.error(f"Error clearing chat history: {e}")
-
 # Инициализация базы данных
 db = ChatDatabase()
 
@@ -236,6 +508,125 @@ YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completio
 # Триггеры для обращения к боту
 BOT_TRIGGERS = ['/bot', 'бот', '@bot']
 
+# === УТИЛИТЫ ДЛЯ РАБОТЫ С ФАЙЛАМИ ===
+def extract_text_from_image(image_path: str) -> str:
+    """Извлечение текста из изображения с помощью OCR"""
+    try:
+        # Загружаем изображение
+        image = cv2.imread(image_path)
+        
+        # Препроцессинг для улучшения OCR
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Применяем различные фильтры для улучшения качества
+        denoised = cv2.medianBlur(gray, 5)
+        thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        
+        # Сохраняем обработанное изображение во временный файл
+        temp_path = "/tmp/processed_image.png"
+        cv2.imwrite(temp_path, thresh)
+        
+        # Извлекаем текст
+        text = pytesseract.image_to_string(Image.open(temp_path), lang='rus+eng')
+        
+        # Удаляем временный файл
+        os.unlink(temp_path)
+        
+        return text.strip()
+        
+    except Exception as e:
+        logger.error(f"Error extracting text from image: {e}")
+        return ""
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Извлечение текста из PDF"""
+    try:
+        images = pdf2image.convert_from_path(pdf_path)
+        text = ""
+        
+        for i, image in enumerate(images):
+            temp_path = f"/tmp/pdf_page_{i}.png"
+            image.save(temp_path, 'PNG')
+            page_text = extract_text_from_image(temp_path)
+            text += f"Страница {i+1}:\n{page_text}\n\n"
+            os.unlink(temp_path)
+        
+        return text.strip()
+        
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF: {e}")
+        return ""
+
+def parse_reminder_time(time_str: str) -> datetime:
+    """Парсинг времени для напоминаний"""
+    try:
+        time_str = time_str.lower().strip()
+        now = datetime.now()
+        
+        # Относительное время (через 2 часа, через 30 минут)
+        if time_str.startswith('через'):
+            parts = time_str.split()
+            if 'минут' in time_str:
+                minutes = int(''.join(filter(str.isdigit, parts[1])))
+                return now + timedelta(minutes=minutes)
+            elif 'час' in time_str:
+                hours = int(''.join(filter(str.isdigit, parts[1])))
+                return now + timedelta(hours=hours)
+            elif 'день' in time_str or 'дня' in time_str or 'дней' in time_str:
+                days = int(''.join(filter(str.isdigit, parts[1])))
+                return now + timedelta(days=days)
+        
+        # Абсолютное время (18:30, 2024-12-25 18:30)
+        elif ':' in time_str:
+            if len(time_str) == 5:  # 18:30
+                time_obj = datetime.strptime(time_str, '%H:%M')
+                reminder_time = now.replace(hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0)
+                if reminder_time < now:
+                    reminder_time += timedelta(days=1)
+                return reminder_time
+            else:  # 2024-12-25 18:30
+                return datetime.strptime(time_str, '%Y-%m-%d %H:%M')
+        
+        # Завтра в определенное время
+        elif time_str.startswith('завтра'):
+            time_part = time_str.replace('завтра', '').strip()
+            if ':' in time_part:
+                time_obj = datetime.strptime(time_part, '%H:%M')
+                reminder_time = (now + timedelta(days=1)).replace(
+                    hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0
+                )
+                return reminder_time
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error parsing reminder time: {e}")
+        return None
+
+# === ФУНКЦИИ ДЛЯ РАБОТЫ С НАПОМИНАНИЯМИ ===
+async def check_reminders(context: CallbackContext):
+    """Проверка и отправка напоминаний"""
+    try:
+        reminders = db.get_active_reminders()
+        
+        for reminder in reminders:
+            reminder_time = datetime.strptime(reminder['time'], '%Y-%m-%d %H:%M:%S')
+            
+            if reminder_time <= datetime.now():
+                message = f"🔔 **Напоминание**\n\n{reminder['text']}"
+                
+                await context.bot.send_message(
+                    chat_id=reminder['chat_id'],
+                    text=message
+                )
+                
+                db.complete_reminder(reminder['id'])
+                logger.info(f"Sent reminder: {reminder['id']}")
+                
+    except Exception as e:
+        logger.error(f"Error checking reminders: {e}")
+
+# === КОМАНДЫ БОТА ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
@@ -243,16 +634,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_text = (
         f"🤖 Привет, {user.first_name}!\n\n"
-        "Я - умный помощник с памятью! Я запоминаю всё, что происходит в чате.\n\n"
-        "**Как со мной общаться:**\n"
-        "• Напиши `/bot [вопрос]` - для обращения ко мне\n"
-        "• Или просто начни сообщение с «бот» или упомяни меня\n"
-        "• Я помню контекст предыдущих сообщений\n\n"
-        "**Другие команды:**\n"
-        "/help - показать справку\n"
-        "/search <запрос> - поиск в истории чата\n"
-        "/summary - статистика чата\n"
-        "/clear - очистить историю (только для админов)"
+        "Я - умный помощник с расширенным функционалом!\n\n"
+        "**Основные возможности:**\n"
+        "• Запоминаю историю чата\n"
+        "• Отвечаю на вопросы через AI\n"
+        "• Управляю напоминаниями\n"
+        "• Веду список дел\n"
+        "• Архивирую документы и фото\n\n"
+        "**Команды:**\n"
+        "📅 Напоминания:\n"
+        "/remind [время] [текст] - создать напоминание\n"
+        "/reminders - мои напоминания\n"
+        "/delete_remind [id] - удалить напоминание\n\n"
+        "✅ Список дел:\n"
+        "/todo [задача] - добавить задачу\n"
+        "/todos - мои задачи\n"
+        "/done [id] - завершить задачу\n"
+        "/delete_todo [id] - удалить задачу\n\n"
+        "📁 Архив:\n"
+        "/archive - поиск в архиве\n"
+        "/archive_photo - архив фото\n"
+        "/archive_docs - архив документов\n\n"
+        "💬 AI помощник:\n"
+        "/bot [вопрос] - задать вопрос AI\n"
+        "/search [запрос] - поиск в истории\n"
+        "/summary - статистика чата"
     )
     
     await update.message.reply_text(welcome_text)
@@ -261,23 +667,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = (
-        "💡 **Как использовать бота:**\n\n"
-        "**Обращение к боту:**\n"
-        "• `/bot [ваш вопрос]` - основной способ обращения\n"
-        "• `бот [ваш вопрос]` - можно без слеша\n"
-        "• Ответ на сообщение бота с `@bot`\n\n"
-        "**Особенности:**\n"
-        "• Я запоминаю весь контекст чата\n"
-        "• При ответе учитываю предыдущие сообщения\n"
-        "• Отвечаю только на прямые обращения\n\n"
-        "**Команды управления:**\n"
-        "/search <запрос> - поиск в истории\n"
-        "/summary - статистика чата\n"
-        "/clear - очистить историю (админы)\n\n"
-        "**Примеры:**\n"
-        "`/bot привет!`\n"
-        "`бот какая погода?`\n"
-        "`@bot помоги с проектом`"
+        "📋 **Доступные команды:**\n\n"
+        "🔔 **Напоминания:**\n"
+        "`/remind 18:30 Позвонить маме`\n"
+        "`/remind 2024-12-25 10:00 Поздравления`\n"
+        "`/remind через 2 часа Проверить почту`\n"
+        "`/reminders` - список напоминаний\n"
+        "`/delete_remind 1` - удалить напоминание\n\n"
+        "✅ **Список дел:**\n"
+        "`/todo Купить продукты`\n"
+        "`/todo Завтра 14:00 Забрать посылку`\n"
+        "`/todos` - активные задачи\n"
+        "`/todos_done` - выполненные задачи\n"
+        "`/done 1` - завершить задачу\n"
+        "`/delete_todo 1` - удалить задачу\n\n"
+        "📁 **Архив файлов:**\n"
+        "Просто отправьте фото или документ - я сохраню его в архив\n"
+        "`/archive ключевые слова` - поиск в архиве\n"
+        "`/archive_photo` - только фото\n"
+        "`/archive_docs` - только документы\n\n"
+        "🤖 **AI помощник:**\n"
+        "`/bot [вопрос]` - задать вопрос\n"
+        "`бот [вопрос]` - альтернативный вызов\n"
+        "`@бот [вопрос]` - через упоминание"
     )
     
     await update.message.reply_text(help_text)
@@ -285,6 +697,407 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    update.effective_user.username or update.effective_user.first_name, 
                    "/help", False)
 
+# === КОМАНДЫ НАПОМИНАНИЙ ===
+async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создание напоминания"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ Используйте: `/remind [время] [текст]`\n\n"
+            "Примеры:\n"
+            "`/remind 18:30 Позвонить маме`\n"
+            "`/remind 2024-12-25 10:00 Поздравления`\n"
+            "`/remind через 2 часа Проверить почту`\n"
+            "`/remind завтра 09:00 Совещание`"
+        )
+        return
+    
+    # Парсим время (первые 1-2 слова)
+    time_parts = []
+    text_parts = []
+    time_parsed = False
+    
+    for arg in context.args:
+        if not time_parsed and (':' in arg or 'через' in arg or 'завтра' in arg):
+            time_parts.append(arg)
+            if ':' in arg or len(time_parts) >= 2:
+                time_parsed = True
+        else:
+            text_parts.append(arg)
+            time_parsed = True
+    
+    time_str = ' '.join(time_parts)
+    reminder_text = ' '.join(text_parts)
+    
+    reminder_time = parse_reminder_time(time_str)
+    
+    if not reminder_time:
+        await update.message.reply_text(
+            "❌ Не могу распознать время. Примеры:\n"
+            "`18:30` - сегодня в 18:30\n"
+            "`2024-12-25 10:00` - конкретная дата\n"
+            "`через 2 часа` - через 2 часа\n"
+            "`завтра 09:00` - завтра в 9 утра"
+        )
+        return
+    
+    reminder_id = db.create_reminder(chat_id, user_id, username, reminder_text, reminder_time)
+    
+    if reminder_id:
+        await update.message.reply_text(
+            f"✅ Напоминание создано!\n\n"
+            f"📅 **Когда:** {reminder_time.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📝 **Текст:** {reminder_text}\n"
+            f"🆔 **ID:** {reminder_id}"
+        )
+    else:
+        await update.message.reply_text("❌ Ошибка при создании напоминания")
+
+async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать активные напоминания"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    reminders = db.get_active_reminders(chat_id)
+    
+    if not reminders:
+        await update.message.reply_text("📭 У вас нет активных напоминаний")
+        return
+    
+    response = "🔔 **Ваши напоминания:**\n\n"
+    
+    for reminder in reminders:
+        reminder_time = datetime.strptime(reminder['time'], '%Y-%m-%d %H:%M:%S')
+        response += (
+            f"🆔 **{reminder['id']}**\n"
+            f"📅 {reminder_time.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📝 {reminder['text']}\n\n"
+        )
+    
+    response += "❌ Удалить: `/delete_remind [id]`"
+    
+    await update.message.reply_text(response)
+
+async def delete_remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удалить напоминание"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("❌ Укажите ID напоминания: `/delete_remind 1`")
+        return
+    
+    try:
+        reminder_id = int(context.args[0])
+        success = db.delete_reminder(reminder_id, user_id)
+        
+        if success:
+            await update.message.reply_text(f"✅ Напоминание {reminder_id} удалено")
+        else:
+            await update.message.reply_text("❌ Не удалось удалить напоминание")
+            
+    except ValueError:
+        await update.message.reply_text("❌ ID должен быть числом")
+
+# === КОМАНДЫ СПИСКА ДЕЛ ===
+async def todo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавить задачу в список дел"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Используйте: `/todo [задача]`\n\n"
+            "Примеры:\n"
+            "`/todo Купить продукты`\n"
+            "`/todo Завтра 14:00 Забрать посылку`\n"
+            "`/todo !!! СРОЧНО Сделать отчет`"
+        )
+        return
+    
+    task_text = ' '.join(context.args)
+    due_date = None
+    
+    # Пытаемся найти дату в тексте задачи
+    task_time = parse_reminder_time(task_text)
+    if task_time:
+        due_date = task_time
+    
+    task_id = db.create_todo(chat_id, user_id, username, task_text, due_date)
+    
+    if task_id:
+        response = f"✅ Задача добавлена!\n\n📝 **Задача:** {task_text}"
+        if due_date:
+            response += f"\n📅 **Срок:** {due_date.strftime('%d.%m.%Y %H:%M')}"
+        response += f"\n🆔 **ID:** {task_id}"
+        
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("❌ Ошибка при добавлении задачи")
+
+async def todos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать список дел"""
+    chat_id = update.effective_chat.id
+    
+    todos = db.get_todos(chat_id, completed=False)
+    
+    if not todos:
+        await update.message.reply_text("✅ У вас нет активных задач!")
+        return
+    
+    response = "✅ **Ваши задачи:**\n\n"
+    
+    for todo in todos:
+        priority_emoji = "🔴" if todo['priority'] == 3 else "🟡" if todo['priority'] == 2 else "🟢"
+        response += f"{priority_emoji} **{todo['id']}**. {todo['task_text']}"
+        
+        if todo['due_date']:
+            due_date = datetime.strptime(todo['due_date'], '%Y-%m-%d %H:%M:%S')
+            response += f" (до {due_date.strftime('%d.%m.%Y %H:%M')})"
+        
+        response += "\n"
+    
+    response += "\n✅ Завершить: `/done [id]`\n❌ Удалить: `/delete_todo [id]`"
+    
+    await update.message.reply_text(response)
+
+async def todos_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать выполненные задачи"""
+    chat_id = update.effective_chat.id
+    
+    todos = db.get_todos(chat_id, completed=True)
+    
+    if not todos:
+        await update.message.reply_text("📊 У вас нет выполненных задач")
+        return
+    
+    response = "📊 **Выполненные задачи:**\n\n"
+    
+    for todo in todos:
+        completed_date = datetime.strptime(todo['completed_at'], '%Y-%m-%d %H:%M:%S')
+        response += f"✅ **{todo['id']}**. {todo['task_text']}\n"
+        response += f"   📅 Выполнено: {completed_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+    
+    await update.message.reply_text(response)
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Завершить задачу"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("❌ Укажите ID задачи: `/done 1`")
+        return
+    
+    try:
+        task_id = int(context.args[0])
+        success = db.complete_todo(task_id, user_id)
+        
+        if success:
+            await update.message.reply_text(f"✅ Задача {task_id} выполнена!")
+        else:
+            await update.message.reply_text("❌ Не удалось завершить задачу")
+            
+    except ValueError:
+        await update.message.reply_text("❌ ID должен быть числом")
+
+async def delete_todo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удалить задачу"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("❌ Укажите ID задачи: `/delete_todo 1`")
+        return
+    
+    try:
+        task_id = int(context.args[0])
+        success = db.delete_todo(task_id, user_id)
+        
+        if success:
+            await update.message.reply_text(f"✅ Задача {task_id} удалена")
+        else:
+            await update.message.reply_text("❌ Не удалось удалить задачу")
+            
+    except ValueError:
+        await update.message.reply_text("❌ ID должен быть числом")
+
+# === КОМАНДЫ АРХИВА ===
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка документов"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    
+    document = update.message.document
+    file = await context.bot.get_file(document.file_id)
+    
+    # Создаем папку для архива если нет
+    archive_dir = "archives"
+    os.makedirs(archive_dir, exist_ok=True)
+    
+    file_path = os.path.join(archive_dir, document.file_name)
+    await file.download_to_drive(file_path)
+    
+    # Извлекаем текст в зависимости от типа файла
+    text_content = ""
+    ocr_text = ""
+    
+    if document.file_name.lower().endswith(('.pdf')):
+        text_content = extract_text_from_pdf(file_path)
+    elif document.file_name.lower().endswith(('.txt', '.md')):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            text_content = f.read()
+    
+    # Сохраняем в базу
+    archive_id = db.save_to_archive(
+        chat_id, user_id, username,
+        document.file_name, 'document', file_path,
+        text_content, ocr_text, document.file_size
+    )
+    
+    if archive_id:
+        response = f"📄 Документ сохранен в архив!\n\n📁 **Файл:** {document.file_name}"
+        if text_content:
+            preview = text_content[:200] + "..." if len(text_content) > 200 else text_content
+            response += f"\n📝 **Содержание:** {preview}"
+        response += f"\n🆔 **ID:** {archive_id}"
+        
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("❌ Ошибка при сохранении документа")
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка фото"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    
+    photo = update.message.photo[-1]  # Берем самое качественное фото
+    file = await context.bot.get_file(photo.file_id)
+    
+    # Создаем папку для архива если нет
+    archive_dir = "archives"
+    os.makedirs(archive_dir, exist_ok=True)
+    
+    file_name = f"photo_{photo.file_id}.jpg"
+    file_path = os.path.join(archive_dir, file_name)
+    await file.download_to_drive(file_path)
+    
+    # Извлекаем текст с фото
+    ocr_text = extract_text_from_image(file_path)
+    
+    # Сохраняем в базу
+    archive_id = db.save_to_archive(
+        chat_id, user_id, username,
+        file_name, 'photo', file_path,
+        "", ocr_text, photo.file_size
+    )
+    
+    if archive_id:
+        response = f"📸 Фото сохранено в архив!\n\n🆔 **ID:** {archive_id}"
+        if ocr_text:
+            preview = ocr_text[:200] + "..." if len(ocr_text) > 200 else ocr_text
+            response += f"\n📝 **Текст на фото:** {preview}"
+        
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("❌ Ошибка при сохранении фото")
+
+async def archive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск в архиве"""
+    chat_id = update.effective_chat.id
+    
+    query = ' '.join(context.args) if context.args else None
+    archives = db.search_archives(chat_id, query)
+    
+    if not archives:
+        await update.message.reply_text("📭 В архиве ничего не найдено")
+        return
+    
+    response = "📁 **Результаты поиска в архиве:**\n\n"
+    
+    for archive in archives[:10]:  # Ограничиваем вывод
+        emoji = "📸" if archive['file_type'] == 'photo' else "📄"
+        response += f"{emoji} **{archive['id']}**. {archive['file_name']}\n"
+        
+        if archive['uploaded_at']:
+            upload_date = datetime.strptime(archive['uploaded_at'], '%Y-%m-%d %H:%M:%S')
+            response += f"   📅 {upload_date.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        if archive['text_content']:
+            preview = archive['text_content'][:100] + "..." if len(archive['text_content']) > 100 else archive['text_content']
+            response += f"   📝 {preview}\n"
+        elif archive['ocr_text']:
+            preview = archive['ocr_text'][:100] + "..." if len(archive['ocr_text']) > 100 else archive['ocr_text']
+            response += f"   🔍 {preview}\n"
+        
+        response += "\n"
+    
+    await update.message.reply_text(response)
+
+async def archive_photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Архив фото"""
+    chat_id = update.effective_chat.id
+    
+    query = ' '.join(context.args) if context.args else None
+    archives = db.search_archives(chat_id, query, 'photo')
+    
+    if not archives:
+        await update.message.reply_text("📭 В архиве фото ничего не найдено")
+        return
+    
+    response = "📸 **Архив фото:**\n\n"
+    
+    for archive in archives[:10]:
+        response += f"🆔 **{archive['id']}**\n"
+        response += f"📁 {archive['file_name']}\n"
+        
+        if archive['uploaded_at']:
+            upload_date = datetime.strptime(archive['uploaded_at'], '%Y-%m-%d %H:%M:%S')
+            response += f"📅 {upload_date.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        if archive['ocr_text']:
+            preview = archive['ocr_text'][:100] + "..." if len(archive['ocr_text']) > 100 else archive['ocr_text']
+            response += f"🔍 {preview}\n"
+        
+        response += "\n"
+    
+    await update.message.reply_text(response)
+
+async def archive_docs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Архив документов"""
+    chat_id = update.effective_chat.id
+    
+    query = ' '.join(context.args) if context.args else None
+    archives = db.search_archives(chat_id, query, 'document')
+    
+    if not archives:
+        await update.message.reply_text("📭 В архиве документов ничего не найдено")
+        return
+    
+    response = "📄 **Архив документов:**\n\n"
+    
+    for archive in archives[:10]:
+        response += f"🆔 **{archive['id']}**. {archive['file_name']}\n"
+        
+        if archive['uploaded_at']:
+            upload_date = datetime.strptime(archive['uploaded_at'], '%Y-%m-%d %H:%M:%S')
+            response += f"   📅 {upload_date.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        if archive['text_content']:
+            preview = archive['text_content'][:100] + "..." if len(archive['text_content']) > 100 else archive['text_content']
+            response += f"   📝 {preview}\n"
+        
+        response += "\n"
+    
+    await update.message.reply_text(response)
+
+# === СУЩЕСТВУЮЩИЕ КОМАНДЫ (AI помощник) ===
 async def bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /bot"""
     chat_id = update.effective_chat.id
@@ -333,41 +1146,19 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     
-    summary = db.get_chat_summary(chat_id)
-    
-    if not summary or summary['total_messages'] == 0:
-        await update.message.reply_text("📊 В этом чате пока нет сообщений для анализа.")
-        return
+    # Простая статистика
+    todos = db.get_todos(chat_id, completed=False)
+    reminders = db.get_active_reminders(chat_id)
+    archives = db.search_archives(chat_id)
     
     response = "📊 **Статистика чата:**\n\n"
-    response += f"• Всего сообщений: {summary['total_messages']}\n"
-    response += f"• Участников: {summary['unique_users']}\n"
-    response += f"• Первое сообщение: {summary['first_message'][:10]}\n"
-    response += f"• Последнее сообщение: {summary['last_message'][:16]}\n\n"
-    
-    if summary['top_users']:
-        response += "👥 **Самые активные пользователи:**\n"
-        for user in summary['top_users'][:3]:
-            response += f"• {user['username']} ({user['count']} сообщ.)\n"
+    response += f"✅ Активных задач: {len(todos)}\n"
+    response += f"🔔 Активных напоминаний: {len(reminders)}\n"
+    response += f"📁 Файлов в архиве: {len(archives)}\n"
     
     await update.message.reply_text(response)
     db.save_message(chat_id, user_id, update.effective_user.username or update.effective_user.first_name, 
                    "/summary", False)
-
-async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Очистка истории чата (только для админов)"""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    
-    chat_member = await context.bot.get_chat_member(chat_id, user_id)
-    if chat_member.status not in ['creator', 'administrator']:
-        await update.message.reply_text("❌ Эта команда доступна только администраторам чата.")
-        return
-    
-    db.clear_chat_history(chat_id)
-    await update.message.reply_text("✅ История чата очищена.")
-    db.save_message(chat_id, user_id, update.effective_user.username or update.effective_user.first_name, 
-                   "/clear", False)
 
 def should_respond_to_message(message_text: str, bot_username: str) -> bool:
     """Проверяет, должно ли сообщение trigger ответ бота"""
@@ -515,25 +1306,58 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Произошла ошибка. Пожалуйста, попробуйте позже."
         )
 
+def reminder_worker(context: CallbackContext):
+    """Фоновая задача для проверки напоминаний"""
+    asyncio.create_task(check_reminders(context))
+
 def main():
     """Основная функция"""
     try:
-        logger.info("Starting AI bot with context memory...")
+        logger.info("Starting enhanced AI bot with reminders, todos and archive...")
         
         application = Application.builder().token(TELEGRAM_TOKEN).build()
         
+        # Основные команды
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
+        
+        # Напоминания
+        application.add_handler(CommandHandler("remind", remind_command))
+        application.add_handler(CommandHandler("reminders", reminders_command))
+        application.add_handler(CommandHandler("delete_remind", delete_remind_command))
+        
+        # Список дел
+        application.add_handler(CommandHandler("todo", todo_command))
+        application.add_handler(CommandHandler("todos", todos_command))
+        application.add_handler(CommandHandler("todos_done", todos_done_command))
+        application.add_handler(CommandHandler("done", done_command))
+        application.add_handler(CommandHandler("delete_todo", delete_todo_command))
+        
+        # Архив
+        application.add_handler(CommandHandler("archive", archive_command))
+        application.add_handler(CommandHandler("archive_photo", archive_photo_command))
+        application.add_handler(CommandHandler("archive_docs", archive_docs_command))
+        
+        # AI помощник
         application.add_handler(CommandHandler("bot", bot_command))
         application.add_handler(CommandHandler("search", search_command))
         application.add_handler(CommandHandler("summary", summary_command))
-        application.add_handler(CommandHandler("clear", clear_command))
         
+        # Обработчики файлов
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        
+        # Обработчик текстовых сообщений
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
+        # Обработчик ошибок
         application.add_error_handler(error_handler)
         
-        logger.info("Bot started successfully with context memory")
+        # Настройка планировщика для напоминаний
+        job_queue = application.job_queue
+        job_queue.run_repeating(reminder_worker, interval=60, first=10)  # Проверка каждую минуту
+        
+        logger.info("Bot started successfully with enhanced features")
         application.run_polling()
         
     except Exception as e:

@@ -3,17 +3,11 @@ import os
 import requests
 import sqlite3
 import json
-import schedule
-import time
-import threading
 from datetime import datetime, timedelta
-from telegram import Update, InputFile
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
-import pytesseract
 from PIL import Image
-import cv2
 import io
-import pdf2image
 import tempfile
 
 # Настройка логирования
@@ -441,65 +435,6 @@ class ChatDatabase:
             logger.error(f"Error searching archives: {e}")
             return []
 
-    def get_chat_history(self, chat_id: int, limit: int = 50) -> list:
-        """Получение истории чата"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT username, message_text, timestamp, is_bot_message
-                FROM chat_messages 
-                WHERE chat_id = ? 
-                ORDER BY timestamp DESC 
-                LIMIT ?
-            ''', (chat_id, limit))
-            
-            messages = []
-            for row in cursor.fetchall():
-                messages.append({
-                    'username': row[0],
-                    'text': row[1],
-                    'timestamp': row[2],
-                    'is_bot': bool(row[3])
-                })
-            
-            conn.close()
-            return list(reversed(messages))
-            
-        except Exception as e:
-            logger.error(f"Error getting chat history: {e}")
-            return []
-
-    def search_messages(self, chat_id: int, query: str, limit: int = 10) -> list:
-        """Поиск сообщений по ключевым словам"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT username, message_text, timestamp
-                FROM chat_messages 
-                WHERE chat_id = ? AND message_text LIKE ?
-                ORDER BY timestamp DESC 
-                LIMIT ?
-            ''', (chat_id, f'%{query}%', limit))
-            
-            results = []
-            for row in cursor.fetchall():
-                results.append({
-                    'username': row[0],
-                    'text': row[1],
-                    'timestamp': row[2]
-                })
-            
-            conn.close()
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error searching messages: {e}")
-            return []
-
 # Инициализация базы данных
 db = ChatDatabase()
 
@@ -507,55 +442,6 @@ YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completio
 
 # Триггеры для обращения к боту
 BOT_TRIGGERS = ['/bot', 'бот', '@bot']
-
-# === УТИЛИТЫ ДЛЯ РАБОТЫ С ФАЙЛАМИ ===
-def extract_text_from_image(image_path: str) -> str:
-    """Извлечение текста из изображения с помощью OCR"""
-    try:
-        # Загружаем изображение
-        image = cv2.imread(image_path)
-        
-        # Препроцессинг для улучшения OCR
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Применяем различные фильтры для улучшения качества
-        denoised = cv2.medianBlur(gray, 5)
-        thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        
-        # Сохраняем обработанное изображение во временный файл
-        temp_path = "/tmp/processed_image.png"
-        cv2.imwrite(temp_path, thresh)
-        
-        # Извлекаем текст
-        text = pytesseract.image_to_string(Image.open(temp_path), lang='rus+eng')
-        
-        # Удаляем временный файл
-        os.unlink(temp_path)
-        
-        return text.strip()
-        
-    except Exception as e:
-        logger.error(f"Error extracting text from image: {e}")
-        return ""
-
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """Извлечение текста из PDF"""
-    try:
-        images = pdf2image.convert_from_path(pdf_path)
-        text = ""
-        
-        for i, image in enumerate(images):
-            temp_path = f"/tmp/pdf_page_{i}.png"
-            image.save(temp_path, 'PNG')
-            page_text = extract_text_from_image(temp_path)
-            text += f"Страница {i+1}:\n{page_text}\n\n"
-            os.unlink(temp_path)
-        
-        return text.strip()
-        
-    except Exception as e:
-        logger.error(f"Error extracting text from PDF: {e}")
-        return ""
 
 def parse_reminder_time(time_str: str) -> datetime:
     """Парсинг времени для напоминаний"""
@@ -653,8 +539,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/delete_todo [id] - удалить задачу\n\n"
         "📁 Архив:\n"
         "/archive - поиск в архиве\n"
-        "/archive_photo - архив фото\n"
-        "/archive_docs - архив документов\n\n"
+        "Отправьте файл или фото - я сохраню его\n\n"
         "💬 AI помощник:\n"
         "/bot [вопрос] - задать вопрос AI\n"
         "/search [запрос] - поиск в истории\n"
@@ -683,9 +568,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/delete_todo 1` - удалить задачу\n\n"
         "📁 **Архив файлов:**\n"
         "Просто отправьте фото или документ - я сохраню его в архив\n"
-        "`/archive ключевые слова` - поиск в архиве\n"
-        "`/archive_photo` - только фото\n"
-        "`/archive_docs` - только документы\n\n"
+        "`/archive ключевые слова` - поиск в архиве\n\n"
         "🤖 **AI помощник:**\n"
         "`/bot [вопрос]` - задать вопрос\n"
         "`бот [вопрос]` - альтернативный вызов\n"
@@ -945,19 +828,23 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Извлекаем текст в зависимости от типа файла
     text_content = ""
-    ocr_text = ""
     
-    if document.file_name.lower().endswith(('.pdf')):
-        text_content = extract_text_from_pdf(file_path)
-    elif document.file_name.lower().endswith(('.txt', '.md')):
-        with open(file_path, 'r', encoding='utf-8') as f:
-            text_content = f.read()
+    if document.file_name.lower().endswith(('.txt', '.md')):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                text_content = f.read()
+        except:
+            try:
+                with open(file_path, 'r', encoding='cp1251') as f:
+                    text_content = f.read()
+            except:
+                text_content = "Не удалось прочитать файл"
     
     # Сохраняем в базу
     archive_id = db.save_to_archive(
         chat_id, user_id, username,
         document.file_name, 'document', file_path,
-        text_content, ocr_text, document.file_size
+        text_content, "", document.file_size
     )
     
     if archive_id:
@@ -988,22 +875,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_path = os.path.join(archive_dir, file_name)
     await file.download_to_drive(file_path)
     
-    # Извлекаем текст с фото
-    ocr_text = extract_text_from_image(file_path)
-    
-    # Сохраняем в базу
+    # Сохраняем в базу (без OCR для упрощения)
     archive_id = db.save_to_archive(
         chat_id, user_id, username,
         file_name, 'photo', file_path,
-        "", ocr_text, photo.file_size
+        "", "", photo.file_size
     )
     
     if archive_id:
         response = f"📸 Фото сохранено в архив!\n\n🆔 **ID:** {archive_id}"
-        if ocr_text:
-            preview = ocr_text[:200] + "..." if len(ocr_text) > 200 else ocr_text
-            response += f"\n📝 **Текст на фото:** {preview}"
-        
         await update.message.reply_text(response)
     else:
         await update.message.reply_text("❌ Ошибка при сохранении фото")
@@ -1024,66 +904,6 @@ async def archive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for archive in archives[:10]:  # Ограничиваем вывод
         emoji = "📸" if archive['file_type'] == 'photo' else "📄"
         response += f"{emoji} **{archive['id']}**. {archive['file_name']}\n"
-        
-        if archive['uploaded_at']:
-            upload_date = datetime.strptime(archive['uploaded_at'], '%Y-%m-%d %H:%M:%S')
-            response += f"   📅 {upload_date.strftime('%d.%m.%Y %H:%M')}\n"
-        
-        if archive['text_content']:
-            preview = archive['text_content'][:100] + "..." if len(archive['text_content']) > 100 else archive['text_content']
-            response += f"   📝 {preview}\n"
-        elif archive['ocr_text']:
-            preview = archive['ocr_text'][:100] + "..." if len(archive['ocr_text']) > 100 else archive['ocr_text']
-            response += f"   🔍 {preview}\n"
-        
-        response += "\n"
-    
-    await update.message.reply_text(response)
-
-async def archive_photo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Архив фото"""
-    chat_id = update.effective_chat.id
-    
-    query = ' '.join(context.args) if context.args else None
-    archives = db.search_archives(chat_id, query, 'photo')
-    
-    if not archives:
-        await update.message.reply_text("📭 В архиве фото ничего не найдено")
-        return
-    
-    response = "📸 **Архив фото:**\n\n"
-    
-    for archive in archives[:10]:
-        response += f"🆔 **{archive['id']}**\n"
-        response += f"📁 {archive['file_name']}\n"
-        
-        if archive['uploaded_at']:
-            upload_date = datetime.strptime(archive['uploaded_at'], '%Y-%m-%d %H:%M:%S')
-            response += f"📅 {upload_date.strftime('%d.%m.%Y %H:%M')}\n"
-        
-        if archive['ocr_text']:
-            preview = archive['ocr_text'][:100] + "..." if len(archive['ocr_text']) > 100 else archive['ocr_text']
-            response += f"🔍 {preview}\n"
-        
-        response += "\n"
-    
-    await update.message.reply_text(response)
-
-async def archive_docs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Архив документов"""
-    chat_id = update.effective_chat.id
-    
-    query = ' '.join(context.args) if context.args else None
-    archives = db.search_archives(chat_id, query, 'document')
-    
-    if not archives:
-        await update.message.reply_text("📭 В архиве документов ничего не найдено")
-        return
-    
-    response = "📄 **Архив документов:**\n\n"
-    
-    for archive in archives[:10]:
-        response += f"🆔 **{archive['id']}**. {archive['file_name']}\n"
         
         if archive['uploaded_at']:
             upload_date = datetime.strptime(archive['uploaded_at'], '%Y-%m-%d %H:%M:%S')
@@ -1138,8 +958,6 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response += f"   {result['text'][:100]}...\n\n"
     
     await update.message.reply_text(response)
-    db.save_message(chat_id, user_id, update.effective_user.username or update.effective_user.first_name, 
-                   f"/search {query}", False)
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статистика чата"""
@@ -1157,8 +975,6 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response += f"📁 Файлов в архиве: {len(archives)}\n"
     
     await update.message.reply_text(response)
-    db.save_message(chat_id, user_id, update.effective_user.username or update.effective_user.first_name, 
-                   "/summary", False)
 
 def should_respond_to_message(message_text: str, bot_username: str) -> bool:
     """Проверяет, должно ли сообщение trigger ответ бота"""
@@ -1308,6 +1124,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def reminder_worker(context: CallbackContext):
     """Фоновая задача для проверки напоминаний"""
+    import asyncio
     asyncio.create_task(check_reminders(context))
 
 def main():
@@ -1335,8 +1152,6 @@ def main():
         
         # Архив
         application.add_handler(CommandHandler("archive", archive_command))
-        application.add_handler(CommandHandler("archive_photo", archive_photo_command))
-        application.add_handler(CommandHandler("archive_docs", archive_docs_command))
         
         # AI помощник
         application.add_handler(CommandHandler("bot", bot_command))

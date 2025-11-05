@@ -6,10 +6,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 from config import TELEGRAM_TOKEN, ADMIN_ID, LOG_LEVEL
 from database import Database
-from payment import PaymentSystem
-from reminder import ReminderManager
-from finance import FinanceManager
-from chat_monitor import ChatMonitor
 
 # Настройка логирования (только в консоль)
 logging.basicConfig(
@@ -25,10 +21,7 @@ class LifeAssistantBot:
         try:
             logger.info("Initializing bot...")
             self.db = Database()
-            self.payment_system = PaymentSystem()
-            self.reminder_manager = ReminderManager(self.db)
-            self.finance_manager = FinanceManager(self.db)
-            self.chat_monitor = ChatMonitor(self.db)
+            logger.info("Database initialized successfully")
             
             self.application = Application.builder().token(TELEGRAM_TOKEN).build()
             self.setup_handlers()
@@ -43,14 +36,8 @@ class LifeAssistantBot:
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("subscribe", self.subscribe))
-        self.application.add_handler(CommandHandler("reminders", self.reminders))
-        self.application.add_handler(CommandHandler("finance", self.finance))
-        self.application.add_handler(CommandHandler("analytics", self.analytics))
         
-        # Обработчики кнопок
-        self.application.add_handler(CallbackQueryHandler(self.button_handler))
-        
-        # Обработка всех сообщений для мониторинга
+        # Обработка всех сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         
         # Обработка ошибок
@@ -66,20 +53,17 @@ class LifeAssistantBot:
         welcome_text = f"""
 👋 Привет, {user.first_name}!
 
-Я твой универсальный помощник по жизни! Вот что я умею:
+Я твой универсальный помощник по жизни! 
 
-📅 **Напоминания** - создавай задачи и напоминания
-💰 **Финансы** - веди учет доходов и расходов
-📊 **Аналитика** - анализирую твои сообщения и финансы
+📅 Напоминания
+💰 Финансы  
+📊 Аналитика
 
-Для доступа ко всем функциям нужна подписка - 500₽/месяц
+Используй /subscribe для покупки подписки (500₽/месяц)
         """
         
         keyboard = [
             [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-            [InlineKeyboardButton("📅 Напоминания", callback_data="reminders")],
-            [InlineKeyboardButton("💰 Финансы", callback_data="finance")],
-            [InlineKeyboardButton("📊 Аналитика", callback_data="analytics")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -92,89 +76,11 @@ class LifeAssistantBot:
             await update.message.reply_text("✅ У вас уже есть активная подписка!")
             return
         
-        payment = self.payment_system.create_payment(user_id)
-        
-        if payment:
-            payment_url = payment['confirmation']['confirmation_url']
-            keyboard = [[InlineKeyboardButton("💳 Оплатить", url=payment_url)]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "Для оплаты подписки нажмите кнопку ниже:",
-                reply_markup=reply_markup
-            )
-        else:
-            await update.message.reply_text("❌ Ошибка при создании платежа")
-    
-    async def reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.db.check_subscription(user_id):
-            await update.message.reply_text("❌ Для доступа к этой функции нужна подписка! Используйте /subscribe")
-            return
-        
-        await update.message.reply_text("📅 Функция напоминаний будет доступна после настройки платежной системы")
-    
-    async def finance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.db.check_subscription(user_id):
-            await update.message.reply_text("❌ Для доступа к этой функции нужна подписка! Используйте /subscribe")
-            return
-        
-        await update.message.reply_text("💰 Функция финансов будет доступна после настройки платежной системы")
-    
-    async def analytics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.db.check_subscription(user_id):
-            await update.message.reply_text("❌ Для доступа к этой функции нужна подписка! Используйте /subscribe")
-            return
-        
-        await update.message.reply_text("📊 Функция аналитики будет доступна после настройки платежной системы")
-    
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
-        
-        user_id = query.from_user.id
-        data = query.data
-        
-        if data == "subscribe":
-            await self.subscribe_callback(query)
-        elif data == "reminders":
-            await query.edit_message_text("📅 Функция напоминаний будет доступна после настройки платежной системы")
-        elif data == "finance":
-            await query.edit_message_text("💰 Функция финансов будет доступна после настройки платежной системы")
-        elif data == "analytics":
-            await query.edit_message_text("📊 Функция аналитики будет доступна после настройки платежной системы")
-    
-    async def subscribe_callback(self, query):
-        user_id = query.from_user.id
-        
-        if self.db.check_subscription(user_id):
-            await query.edit_message_text("✅ У вас уже есть активная подписка!")
-        else:
-            payment = self.payment_system.create_payment(user_id)
-            
-            if payment:
-                payment_url = payment['confirmation']['confirmation_url']
-                keyboard = [[InlineKeyboardButton("💳 Оплатить", url=payment_url)]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await query.edit_message_text(
-                    "Для оплаты подписки нажмите кнопку ниже:",
-                    reply_markup=reply_markup
-                )
-            else:
-                await query.edit_message_text("❌ Ошибка при создании платежа")
+        await update.message.reply_text("💳 Система оплаты настраивается...")
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         message = update.message.text
-        
-        # Логируем сообщение для анализа
-        self.chat_monitor.log_message(user.id, update.effective_chat.id, message)
         
         # Простой ответ на приветствия
         if any(word in message.lower() for word in ['привет', 'hello', 'hi', 'start']):
@@ -185,13 +91,8 @@ class LifeAssistantBot:
 📋 Доступные команды:
 
 /start - Запустить бота
-/subscribe - Купить подписку
+/subscribe - Информация о подписке
 /help - Помощь
-
-После покупки подписки станут доступны:
-/reminders - Управление напоминаниями
-/finance - Финансовый учет
-/analytics - Аналитика
         """
         
         await update.message.reply_text(help_text)

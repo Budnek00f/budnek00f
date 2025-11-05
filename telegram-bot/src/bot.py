@@ -49,8 +49,8 @@ class LifeAssistantBot:
         self.application.add_handler(CommandHandler("analytics", self.analytics))
         self.application.add_handler(CommandHandler("admin", self.admin))
         
-        # Обработчики кнопок - УБИРАЕМ pattern для обработки ВСЕХ callback_data
-        self.application.add_handler(CallbackQueryHandler(self.button_handler))
+        # Обработчики кнопок - ВАЖНО: должен быть после команд
+        self.application.add_handler(CallbackQueryHandler(self.handle_button))
         
         # Обработка всех сообщений для мониторинга
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -78,187 +78,26 @@ class LifeAssistantBot:
         """
         
         keyboard = [
-            [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-            [InlineKeyboardButton("📅 Напоминания", callback_data="reminders_menu")],
-            [InlineKeyboardButton("💰 Финансы", callback_data="finance_menu")],
-            [InlineKeyboardButton("📊 Аналитика", callback_data="analytics_menu")],
+            [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe_btn")],
+            [InlineKeyboardButton("📅 Напоминания", callback_data="reminders_btn")],
+            [InlineKeyboardButton("💰 Финансы", callback_data="finance_btn")],
+            [InlineKeyboardButton("📊 Аналитика", callback_data="analytics_btn")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(welcome_text, reply_markup=reply_markup)
     
     async def subscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if self.db.check_subscription(user_id) or user_id == ADMIN_ID:
-            await update.message.reply_text("✅ У вас уже есть активная подписка!")
-            return
-        
-        try:
-            payment = self.payment_system.create_payment(user_id)
-            
-            if payment and 'confirmation' in payment and 'confirmation_url' in payment['confirmation']:
-                payment_url = payment['confirmation']['confirmation_url']
-                keyboard = [
-                    [InlineKeyboardButton("💳 Оплатить подписку", url=payment_url)],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(
-                    "💳 **Оформление подписки**\n\n"
-                    "Подписка стоит 500₽ в месяц и дает доступ ко всем функциям бота.\n\n"
-                    "Для оплаты нажмите кнопку ниже:",
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
-            else:
-                # Даем тестовый доступ для отладки
-                self.db.update_subscription(user_id, months=1)
-                keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(
-                    "⚠️ **Платежная система в настройке**\n\n"
-                    "Для тестирования вам предоставлен бесплатный доступ на 1 месяц! 🎉\n"
-                    "Теперь все функции доступны.",
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
-                
-        except Exception as e:
-            logger.error(f"Payment error: {e}")
-            # В случае ошибки тоже даем тестовый доступ
-            self.db.update_subscription(user_id, months=1)
-            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "🎉 **Тестовый доступ активирован!**\n\n"
-                "Вам предоставлен бесплатный доступ на 1 месяц для тестирования.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+        await self.process_subscription(update, context)
     
     async def reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
-            keyboard = [
-                [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "❌ **Требуется подписка**\n\n"
-                "Для доступа к напоминаниям нужна активная подписка.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            return
-        
-        # Простая демонстрация напоминаний
-        reminders_list = self.reminder_manager.get_reminders(user_id)
-        
-        if not reminders_list:
-            text = "📝 **Управление напоминаниями**\n\nУ вас пока нет напоминаний.\n\nДобавьте напоминание:\n`/reminders 'Текст напоминания' 2024-01-15 18:00`"
-        else:
-            text = "📝 **Ваши напоминания:**\n\n"
-            for rem in reminders_list:
-                status = "✅" if rem['completed'] else "⏳"
-                text += f"{status} {rem['text']}\n   📅 {rem['due_date']}\n\n"
-        
-        keyboard = [
-            [InlineKeyboardButton("➕ Добавить напоминание", callback_data="add_reminder")],
-            [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await self.process_reminders(update, context)
     
     async def finance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
-            keyboard = [
-                [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "❌ **Требуется подписка**\n\n"
-                "Для доступа к финансовому учету нужна активная подписка.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            return
-        
-        # Финансовый отчет
-        report = self.finance_manager.get_financial_report(user_id)
-        
-        text = f"""
-💰 **Финансовый отчет**
-
-💵 Доходы: {report['income']:.2f}₽
-💸 Расходы: {report['expense']:.2f}₽
-📊 Баланс: {report['balance']:.2f}₽
-
-**Добавьте транзакцию:**
-`/finance 50000 income зарплата`
-`/finance 1500 expense продукты`
-        """
-        
-        keyboard = [
-            [InlineKeyboardButton("💵 Добавить доход", callback_data="add_income")],
-            [InlineKeyboardButton("💸 Добавить расход", callback_data="add_expense")],
-            [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await self.process_finance(update, context)
     
     async def analytics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
-            keyboard = [
-                [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "❌ **Требуется подписка**\n\n"
-                "Для доступа к аналитике нужна активная подписка.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            return
-        
-        # Аналитика
-        chat_analysis = self.chat_monitor.analyze_chat_mood(user_id)
-        finance_report = self.finance_manager.get_financial_report(user_id)
-        
-        text = f"""
-📊 **Аналитика вашей активности**
-
-💬 Сообщений проанализировано: {chat_analysis['total_messages']}
-😊 Позитивных сообщений: {chat_analysis['positive']}
-😔 Негативных сообщений: {chat_analysis['negative']}
-📈 Настроение: {chat_analysis['mood']}
-
-💰 **Финансы:**
-• Доходы: {finance_report['income']:.2f}₽
-• Расходы: {finance_report['expense']:.2f}₽
-• Баланс: {finance_report['balance']:.2f}₽
-        """
-        
-        keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await self.process_analytics(update, context)
     
     async def admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -299,141 +138,230 @@ YOOKASSA_SECRET_KEY=ваш_secret_key
         if any(word in message.lower() for word in ['привет', 'hello', 'hi']):
             await update.message.reply_text(f"👋 Привет, {user.first_name}! Используй /start для начала работы.")
     
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ОБРАБОТКА КНОПОК - ГЛАВНЫЙ МЕТОД
+    async def handle_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
-        user_id = query.from_user.id
         data = query.data
+        user_id = query.from_user.id
         
         logger.info(f"Button pressed: {data} by user {user_id}")
         
-        if data == "subscribe":
-            await self.subscribe_callback(query)
-        elif data == "reminders_menu":
-            await self.reminders_callback(query)
-        elif data == "finance_menu":
-            await self.finance_callback(query)
-        elif data == "analytics_menu":
-            await self.analytics_callback(query)
-        elif data == "main_menu":
-            await self.main_menu_callback(query)
-        elif data == "add_reminder":
-            await self.add_reminder_callback(query)
-        elif data == "add_income":
-            await self.add_income_callback(query)
-        elif data == "add_expense":
-            await self.add_expense_callback(query)
+        # Обработка разных кнопок
+        if data == "subscribe_btn":
+            await self.process_subscription_button(query)
+        elif data == "reminders_btn":
+            await self.process_reminders_button(query)
+        elif data == "finance_btn":
+            await self.process_finance_button(query)
+        elif data == "analytics_btn":
+            await self.process_analytics_button(query)
+        elif data == "back_to_main":
+            await self.show_main_menu(query)
         else:
             await query.edit_message_text(f"❌ Неизвестная команда: {data}")
     
-    async def subscribe_callback(self, query):
+    # МЕТОДЫ ДЛЯ КОМАНД
+    async def process_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if self.db.check_subscription(user_id) or user_id == ADMIN_ID:
+            await update.message.reply_text("✅ У вас уже есть активная подписка!")
+            return
+        
+        # Даем тестовый доступ для всех
+        self.db.update_subscription(user_id, months=1)
+        keyboard = [
+            [InlineKeyboardButton("📅 Напоминания", callback_data="reminders_btn")],
+            [InlineKeyboardButton("💰 Финансы", callback_data="finance_btn")],
+            [InlineKeyboardButton("📊 Аналитика", callback_data="analytics_btn")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "🎉 **Тестовый доступ активирован!**\n\n"
+            "Вам предоставлен бесплатный доступ на 1 месяц для тестирования всех функций!",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    async def process_reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
+            await update.message.reply_text("❌ Для доступа к напоминаниям нужна подписка! Используйте /subscribe")
+            return
+        
+        if context.args:
+            # Добавление напоминания
+            try:
+                if len(context.args) < 2:
+                    await update.message.reply_text("Использование: /reminders [текст] [ГГГГ-ММ-ДД ЧЧ:ММ]")
+                    return
+                
+                text = ' '.join(context.args[:-2])
+                date_str = context.args[-2] + ' ' + context.args[-1]
+                success, message = self.reminder_manager.add_reminder(user_id, text, date_str)
+                await update.message.reply_text(message)
+            except Exception as e:
+                await update.message.reply_text(f"Ошибка: {e}")
+        else:
+            # Показать список напоминаний
+            reminders = self.reminder_manager.get_reminders(user_id)
+            
+            if not reminders:
+                await update.message.reply_text("📝 У вас нет активных напоминаний")
+                return
+            
+            text = "📅 Ваши напоминания:\n\n"
+            for reminder in reminders:
+                status = "✅" if reminder['completed'] else "⏳"
+                text += f"{status} {reminder['text']} - {reminder['due_date']}\n"
+            
+            await update.message.reply_text(text)
+    
+    async def process_finance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
+            await update.message.reply_text("❌ Для доступа к финансовому учету нужна подписка! Используйте /subscribe")
+            return
+        
+        if context.args and len(context.args) >= 3:
+            # Добавление транзакции
+            try:
+                amount = float(context.args[0])
+                transaction_type = context.args[1].lower()
+                category = context.args[2]
+                description = ' '.join(context.args[3:]) if len(context.args) > 3 else ""
+                
+                if transaction_type not in ['income', 'expense']:
+                    await update.message.reply_text("Тип должен быть 'income' или 'expense'")
+                    return
+                
+                self.finance_manager.add_transaction(user_id, amount, category, description, transaction_type)
+                await update.message.reply_text("✅ Транзакция добавлена!")
+            except ValueError:
+                await update.message.reply_text("Использование: /finance [сумма] [income/expense] [категория] [описание]")
+        else:
+            # Финансовый отчет
+            report = self.finance_manager.get_financial_report(user_id)
+            
+            text = f"""
+💰 Финансовый отчет:
+
+💵 Доходы: {report['income']:.2f}₽
+💸 Расходы: {report['expense']:.2f}₽
+📊 Баланс: {report['balance']:.2f}₽
+            """
+            
+            await update.message.reply_text(text)
+    
+    async def process_analytics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
+            await update.message.reply_text("❌ Для доступа к аналитике нужна подписка! Используйте /subscribe")
+            return
+        
+        chat_analysis = self.chat_monitor.analyze_chat_mood(user_id)
+        finance_report = self.finance_manager.get_financial_report(user_id)
+        
+        text = f"""
+📊 Аналитика вашей активности:
+
+💬 Сообщений проанализировано: {chat_analysis['total_messages']}
+😊 Позитивных сообщений: {chat_analysis['positive']}
+😔 Негативных сообщений: {chat_analysis['negative']}
+📈 Настроение: {chat_analysis['mood']}
+
+💰 Финансы:
+• Доходы: {finance_report['income']:.2f}₽
+• Расходы: {finance_report['expense']:.2f}₽
+• Баланс: {finance_report['balance']:.2f}₽
+        """
+        
+        await update.message.reply_text(text)
+    
+    # МЕТОДЫ ДЛЯ КНОПОК
+    async def process_subscription_button(self, query):
         user_id = query.from_user.id
         
         if self.db.check_subscription(user_id) or user_id == ADMIN_ID:
             await query.edit_message_text(
                 "✅ **Подписка активна**\n\n"
-                "У вас есть доступ ко всем функциям бота!",
-                parse_mode='Markdown'
+                "У вас есть доступ ко всем функциям бота!\n\n"
+                "Выберите раздел:",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📅 Напоминания", callback_data="reminders_btn")],
+                    [InlineKeyboardButton("💰 Финансы", callback_data="finance_btn")],
+                    [InlineKeyboardButton("📊 Аналитика", callback_data="analytics_btn")],
+                ])
             )
             return
         
-        try:
-            payment = self.payment_system.create_payment(user_id)
-            
-            if payment and 'confirmation' in payment and 'confirmation_url' in payment['confirmation']:
-                payment_url = payment['confirmation']['confirmation_url']
-                keyboard = [
-                    [InlineKeyboardButton("💳 Оплатить подписку", url=payment_url)],
-                    [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await query.edit_message_text(
-                    "💳 **Оформление подписки**\n\n"
-                    "Подписка стоит 500₽ в месяц.\n\n"
-                    "Для оплаты нажмите кнопку ниже:",
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
-            else:
-                # Даем тестовый доступ
-                self.db.update_subscription(user_id, months=1)
-                keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await query.edit_message_text(
-                    "🎉 **Тестовый доступ активирован!**\n\n"
-                    "Вам предоставлен бесплатный доступ на 1 месяц.",
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
-                
-        except Exception as e:
-            logger.error(f"Payment error in callback: {e}")
-            # Даем тестовый доступ при ошибке
-            self.db.update_subscription(user_id, months=1)
-            keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                "🎉 **Тестовый доступ активирован!**\n\n"
-                "Вам предоставлен бесплатный доступ на 1 месяц.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+        # Даем тестовый доступ
+        self.db.update_subscription(user_id, months=1)
+        
+        await query.edit_message_text(
+            "🎉 **Тестовый доступ активирован!**\n\n"
+            "Вам предоставлен бесплатный доступ на 1 месяц для тестирования всех функций!\n\n"
+            "Теперь вам доступны:",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📅 Напоминания", callback_data="reminders_btn")],
+                [InlineKeyboardButton("💰 Финансы", callback_data="finance_btn")],
+                [InlineKeyboardButton("📊 Аналитика", callback_data="analytics_btn")],
+            ])
+        )
     
-    async def reminders_callback(self, query):
+    async def process_reminders_button(self, query):
         user_id = query.from_user.id
         
         if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
-            keyboard = [
-                [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-                [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
             await query.edit_message_text(
                 "❌ **Требуется подписка**\n\n"
                 "Для доступа к напоминаниям нужна активная подписка.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Получить подписку", callback_data="subscribe_btn")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+                ])
             )
             return
         
         reminders_list = self.reminder_manager.get_reminders(user_id)
         
         if not reminders_list:
-            text = "📝 **Управление напоминаниями**\n\nУ вас пока нет напоминаний.\n\nДобавьте напоминание командой:\n`/reminders 'Текст' 2024-01-15 18:00`"
+            text = "📝 **Управление напоминаниями**\n\nУ вас пока нет напоминаний.\n\nЧтобы добавить напоминание, используйте команду:\n`/reminders 'Текст напоминания' ГГГГ-ММ-ДД ЧЧ:ММ`"
         else:
             text = "📝 **Ваши напоминания:**\n\n"
             for rem in reminders_list:
                 status = "✅" if rem['completed'] else "⏳"
                 text += f"{status} {rem['text']}\n   📅 {rem['due_date']}\n\n"
         
-        keyboard = [
-            [InlineKeyboardButton("➕ Добавить напоминание", callback_data="add_reminder")],
-            [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")],
+            ])
+        )
     
-    async def finance_callback(self, query):
+    async def process_finance_button(self, query):
         user_id = query.from_user.id
         
         if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
-            keyboard = [
-                [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-                [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
             await query.edit_message_text(
                 "❌ **Требуется подписка**\n\n"
                 "Для доступа к финансовому учету нужна активная подписка.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Получить подписку", callback_data="subscribe_btn")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+                ])
             )
             return
         
@@ -446,34 +374,30 @@ YOOKASSA_SECRET_KEY=ваш_secret_key
 💸 Расходы: {report['expense']:.2f}₽
 📊 Баланс: {report['balance']:.2f}₽
 
-Добавьте транзакцию командой:
+Чтобы добавить транзакцию, используйте команду:
 `/finance [сумма] [income/expense] [категория]`
         """
         
-        keyboard = [
-            [InlineKeyboardButton("💵 Добавить доход", callback_data="add_income")],
-            [InlineKeyboardButton("💸 Добавить расход", callback_data="add_expense")],
-            [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")],
+            ])
+        )
     
-    async def analytics_callback(self, query):
+    async def process_analytics_button(self, query):
         user_id = query.from_user.id
         
         if not self.db.check_subscription(user_id) and user_id != ADMIN_ID:
-            keyboard = [
-                [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-                [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
             await query.edit_message_text(
                 "❌ **Требуется подписка**\n\n"
                 "Для доступа к аналитике нужна активная подписка.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Получить подписку", callback_data="subscribe_btn")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+                ])
             )
             return
         
@@ -494,12 +418,15 @@ YOOKASSA_SECRET_KEY=ваш_secret_key
 • Баланс: {finance_report['balance']:.2f}₽
         """
         
-        keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")],
+            ])
+        )
     
-    async def main_menu_callback(self, query):
+    async def show_main_menu(self, query):
         user = query.from_user
         
         welcome_text = f"""
@@ -509,44 +436,14 @@ YOOKASSA_SECRET_KEY=ваш_secret_key
         """
         
         keyboard = [
-            [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
-            [InlineKeyboardButton("📅 Напоминания", callback_data="reminders_menu")],
-            [InlineKeyboardButton("💰 Финансы", callback_data="finance_menu")],
-            [InlineKeyboardButton("📊 Аналитика", callback_data="analytics_menu")],
+            [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe_btn")],
+            [InlineKeyboardButton("📅 Напоминания", callback_data="reminders_btn")],
+            [InlineKeyboardButton("💰 Финансы", callback_data="finance_btn")],
+            [InlineKeyboardButton("📊 Аналитика", callback_data="analytics_btn")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(welcome_text, reply_markup=reply_markup)
-    
-    async def add_reminder_callback(self, query):
-        await query.edit_message_text(
-            "📝 **Добавление напоминания**\n\n"
-            "Используйте команду:\n"
-            "`/reminders 'Текст напоминания' ГГГГ-ММ-ДД ЧЧ:ММ`\n\n"
-            "Пример:\n"
-            "`/reminders Позвонить маме 2024-01-15 18:00`",
-            parse_mode='Markdown'
-        )
-    
-    async def add_income_callback(self, query):
-        await query.edit_message_text(
-            "💵 **Добавление дохода**\n\n"
-            "Используйте команду:\n"
-            "`/finance [сумма] income [категория] [описание]`\n\n"
-            "Пример:\n"
-            "`/finance 50000 income зарплата`",
-            parse_mode='Markdown'
-        )
-    
-    async def add_expense_callback(self, query):
-        await query.edit_message_text(
-            "💸 **Добавление расхода**\n\n"
-            "Используйте команду:\n"
-            "`/finance [сумма] expense [категория] [описание]`\n\n"
-            "Пример:\n"
-            "`/finance 1500 expense продукты еда на неделю`",
-            parse_mode='Markdown'
-        )
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = """

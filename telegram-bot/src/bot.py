@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 class LifeAssistantBot:
     def __init__(self):
         try:
+            logger.info("Initializing bot...")
             self.db = Database()
             self.payment_system = PaymentSystem()
             self.reminder_manager = ReminderManager(self.db)
@@ -48,10 +49,6 @@ class LifeAssistantBot:
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("subscribe", self.subscribe))
-        self.application.add_handler(CommandHandler("reminders", self.reminders))
-        self.application.add_handler(CommandHandler("finance", self.finance))
-        self.application.add_handler(CommandHandler("analytics", self.analytics))
-        self.application.add_handler(CommandHandler("admin", self.admin))
         
         # Обработчики кнопок
         self.application.add_handler(CallbackQueryHandler(self.button_handler))
@@ -65,9 +62,113 @@ class LifeAssistantBot:
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Exception while handling an update: {context.error}")
     
-    # ... остальные методы остаются такими же как в предыдущей версии ...
-    # (start, subscribe, reminders, finance, analytics, admin, handle_message, button_handler, etc.)
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        self.db.add_user(user.id, user.username, user.first_name, user.last_name)
+        
+        welcome_text = f"""
+👋 Привет, {user.first_name}!
 
+Я твой универсальный помощник по жизни! Вот что я умею:
+
+📅 **Напоминания** - создавай задачи и напоминания
+💰 **Финансы** - веди учет доходов и расходов
+📊 **Аналитика** - анализирую твои сообщения и финансы
+
+Для доступа ко всем функциям нужна подписка - 500₽/месяц
+        """
+        
+        keyboard = [
+            [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
+            [InlineKeyboardButton("📅 Напоминания", callback_data="reminders")],
+            [InlineKeyboardButton("💰 Финансы", callback_data="finance")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    
+    async def subscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if self.db.check_subscription(user_id):
+            await update.message.reply_text("✅ У вас уже есть активная подписка!")
+            return
+        
+        payment = self.payment_system.create_payment(user_id)
+        
+        if payment:
+            payment_url = payment['confirmation']['confirmation_url']
+            keyboard = [[InlineKeyboardButton("💳 Оплатить", url=payment_url)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "Для оплаты подписки нажмите кнопку ниже:",
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text("❌ Ошибка при создании платежа")
+    
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = query.from_user.id
+        data = query.data
+        
+        if data == "subscribe":
+            await self.subscribe_callback(query)
+        elif data == "reminders":
+            await query.edit_message_text("📅 Функция напоминаний будет доступна после настройки подписки")
+        elif data == "finance":
+            await query.edit_message_text("💰 Функция финансов будет доступна после настройки подписки")
+    
+    async def subscribe_callback(self, query):
+        user_id = query.from_user.id
+        
+        if self.db.check_subscription(user_id):
+            await query.edit_message_text("✅ У вас уже есть активная подписка!")
+        else:
+            payment = self.payment_system.create_payment(user_id)
+            
+            if payment:
+                payment_url = payment['confirmation']['confirmation_url']
+                keyboard = [[InlineKeyboardButton("💳 Оплатить", url=payment_url)]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    "Для оплаты подписки нажмите кнопку ниже:",
+                    reply_markup=reply_markup
+                )
+            else:
+                await query.edit_message_text("❌ Ошибка при создании платежа")
+    
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        message = update.message.text
+        
+        # Логируем сообщение для анализа
+        self.chat_monitor.log_message(user.id, update.effective_chat.id, message)
+        
+        # Простой ответ на приветствия
+        if any(word in message.lower() for word in ['привет', 'hello', 'hi', 'start']):
+            await update.message.reply_text(f"Привет, {user.first_name}! Используй /start для начала работы.")
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        help_text = """
+📋 Доступные команды:
+
+/start - Запустить бота
+/subscribe - Купить подписку
+/help - Помощь
+
+После покупки подписки станут доступны:
+/reminders - Управление напоминаниями
+/finance - Финансовый учет
+/analytics - Аналитика
+        """
+        
+        await update.message.reply_text(help_text)
+    
     def run(self):
         logger.info("Starting bot...")
         try:

@@ -14,3 +14,8 @@ services:
     environment:
       - PYTHONPATH=/app/src
       - TZ=Europe/Moscow
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

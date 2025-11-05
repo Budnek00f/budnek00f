@@ -35,7 +35,7 @@ if not all([TELEGRAM_TOKEN, YANDEX_API_KEY, YANDEX_FOLDER_ID]):
     if not YANDEX_FOLDER_ID: missing.append('YANDEX_FOLDER_ID')
     raise ValueError(f"Missing environment variables: {', '.join(missing)}")
 
-# Класс базы данных (упрощенный)
+# Класс базы данных
 class ChatDatabase:
     def __init__(self, db_path: str = "data/chat_history.db"):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -48,7 +48,6 @@ class ChatDatabase:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Таблицы остаются без изменений
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS chat_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -187,6 +186,26 @@ class ChatDatabase:
         except Exception as e:
             logger.error(f"Error getting reminders: {e}")
             return []
+
+    def complete_reminder(self, reminder_id: int):
+        """Отметить напоминание как выполненное"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE reminders 
+                SET is_completed = TRUE, is_active = FALSE 
+                WHERE id = ?
+            ''', (reminder_id,))
+            
+            conn.commit()
+            conn.close()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error completing reminder: {e}")
+            return False
 
     def create_todo(self, chat_id: int, user_id: int, username: str, 
                    task_text: str, due_date: datetime = None, priority: int = 1):
@@ -394,6 +413,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Задачи
     elif data == "create_todo":
+        context.user_data['waiting_todo'] = True
         await query.edit_message_text(
             "✅ Введи текст задачи:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="todos")]])
@@ -442,7 +462,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=get_main_menu()
                 )
             else:
-                await update.message.reply_text("❌ Ошибка", reply_markup=get_main_menu())
+                await update.message.reply_text("❌ Ошибка при создании напоминания", reply_markup=get_main_menu())
         else:
             await update.message.reply_text("❌ Ошибка времени", reply_markup=get_main_menu())
         
@@ -455,7 +475,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if task_id:
             await update.message.reply_text(f"✅ Задача добавлена: {text}", reply_markup=get_main_menu())
         else:
-            await update.message.reply_text("❌ Ошибка", reply_markup=get_main_menu())
+            await update.message.reply_text("❌ Ошибка при добавлении задачи", reply_markup=get_main_menu())
         
         context.user_data.clear()
     
@@ -566,6 +586,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"Error: {context.error}")
+    
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "❌ Произошла ошибка. Попробуйте снова.",
+            reply_markup=get_main_menu()
+        )
 
 # === ЗАПУСК ===
 def main():
@@ -576,12 +602,12 @@ def main():
         # Создаем приложение
         application = Application.builder().token(TELEGRAM_TOKEN).build()
         
-        # Добавляем обработчики
+        # Добавляем обработчики - ВАЖНО: CallbackQueryHandler ПЕРВЫМ!
+        application.add_handler(CallbackQueryHandler(handle_button))
+        
+        # Затем команды
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
-        
-        # Обработчик кнопок - ДОЛЖЕН БЫТЬ ПЕРВЫМ после команд!
-        application.add_handler(CallbackQueryHandler(handle_button))
         
         # Обработчики сообщений
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -592,9 +618,10 @@ def main():
         
         # Планировщик
         job_queue = application.job_queue
-        job_queue.run_repeating(reminder_job, interval=60, first=10)
+        if job_queue:
+            job_queue.run_repeating(reminder_job, interval=60, first=10)
         
-        logger.info("Bot started!")
+        logger.info("Bot started successfully!")
         application.run_polling()
         
     except Exception as e:

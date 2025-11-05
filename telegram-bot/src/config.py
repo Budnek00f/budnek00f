@@ -1,4 +1,5 @@
 import os
+import logging
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
@@ -28,3 +29,6 @@ required_vars = ['TELEGRAM_TOKEN', 'YOOKASSA_SHOP_ID', 'YOOKASSA_SECRET_KEY']
 for var in required_vars:
     if not globals()[var]:
         raise ValueError(f"Missing required environment variable: {var}")
+
+# Создание директории для логов если не существует
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)

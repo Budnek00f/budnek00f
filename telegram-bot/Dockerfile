@@ -24,7 +24,11 @@ COPY scripts/ /app/scripts/
 
 # Создание непривилегированного пользователя
 RUN groupadd -r botuser && useradd -r -g botuser botuser
-RUN chown -R botuser:botuser /app
+
+# Установка прав на директории
+RUN chown -R botuser:botuser /app/data /app/logs
+RUN chmod 755 /app/data /app/logs
+
 USER botuser
 
 # Переменные окружения

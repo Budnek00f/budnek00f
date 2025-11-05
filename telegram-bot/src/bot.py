@@ -3,25 +3,19 @@ import sys
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from datetime import datetime
 
-from config import TELEGRAM_TOKEN, ADMIN_ID, LOG_LEVEL, LOG_FILE
+from config import TELEGRAM_TOKEN, ADMIN_ID, LOG_LEVEL
 from database import Database
 from payment import PaymentSystem
 from reminder import ReminderManager
 from finance import FinanceManager
 from chat_monitor import ChatMonitor
 
-# Настройка логирования
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-
+# Настройка логирования (только в консоль)
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +43,9 @@ class LifeAssistantBot:
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("subscribe", self.subscribe))
+        self.application.add_handler(CommandHandler("reminders", self.reminders))
+        self.application.add_handler(CommandHandler("finance", self.finance))
+        self.application.add_handler(CommandHandler("analytics", self.analytics))
         
         # Обработчики кнопок
         self.application.add_handler(CallbackQueryHandler(self.button_handler))
@@ -82,6 +79,7 @@ class LifeAssistantBot:
             [InlineKeyboardButton("💳 Купить подписку", callback_data="subscribe")],
             [InlineKeyboardButton("📅 Напоминания", callback_data="reminders")],
             [InlineKeyboardButton("💰 Финансы", callback_data="finance")],
+            [InlineKeyboardButton("📊 Аналитика", callback_data="analytics")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -108,6 +106,33 @@ class LifeAssistantBot:
         else:
             await update.message.reply_text("❌ Ошибка при создании платежа")
     
+    async def reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if not self.db.check_subscription(user_id):
+            await update.message.reply_text("❌ Для доступа к этой функции нужна подписка! Используйте /subscribe")
+            return
+        
+        await update.message.reply_text("📅 Функция напоминаний будет доступна после настройки платежной системы")
+    
+    async def finance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if not self.db.check_subscription(user_id):
+            await update.message.reply_text("❌ Для доступа к этой функции нужна подписка! Используйте /subscribe")
+            return
+        
+        await update.message.reply_text("💰 Функция финансов будет доступна после настройки платежной системы")
+    
+    async def analytics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if not self.db.check_subscription(user_id):
+            await update.message.reply_text("❌ Для доступа к этой функции нужна подписка! Используйте /subscribe")
+            return
+        
+        await update.message.reply_text("📊 Функция аналитики будет доступна после настройки платежной системы")
+    
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -118,9 +143,11 @@ class LifeAssistantBot:
         if data == "subscribe":
             await self.subscribe_callback(query)
         elif data == "reminders":
-            await query.edit_message_text("📅 Функция напоминаний будет доступна после настройки подписки")
+            await query.edit_message_text("📅 Функция напоминаний будет доступна после настройки платежной системы")
         elif data == "finance":
-            await query.edit_message_text("💰 Функция финансов будет доступна после настройки подписки")
+            await query.edit_message_text("💰 Функция финансов будет доступна после настройки платежной системы")
+        elif data == "analytics":
+            await query.edit_message_text("📊 Функция аналитики будет доступна после настройки платежной системы")
     
     async def subscribe_callback(self, query):
         user_id = query.from_user.id
